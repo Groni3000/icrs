@@ -72,7 +72,7 @@ icrs labels              the value names read/watch understand     - no game nee
 icrs key <keys...>       send keystrokes without focusing the game (--delay)
 icrs ultimates           the ultimates bar: champion, hotkey, cooldown
 icrs ult <who>           fire an ultimate by name, id or --slot    (--force)
-icrs cards               Ellywick's hand from the Deck of Many Things (--gems)
+icrs cards               Ellywick's hand from the Deck of Many Things (--count TYPE)
 icrs effects <who>       a champion's effect keys
 ```
 
@@ -101,9 +101,11 @@ $ icrs ult ellywick
 fired slot 7 (champion #83) with key 8
 $ icrs cards
 hand        Gem, Moon, Knight, Flames, Gem
-gem cards   2
-$ icrs cards --gems
-2
+knight      1
+moon        1
+gem         2
+$ icrs cards --count moon
+1
 $ icrs effects briv | grep haste
  10  briv_unnatural_haste
 ```

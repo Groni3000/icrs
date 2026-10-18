@@ -53,24 +53,44 @@ fn run(cli: &Cli) -> io::Result<()> {
             Ok(())
         }
 
-        Command::Cards { gems, hero } => {
+        Command::Cards { count, gems, hero } => {
             let session = Session::attach(cli, &catalog)?;
             let hero_id = hero.unwrap_or(offsets::effects::ELLYWICK_HERO_ID);
             let hero_index = session.hero_index(&catalog, hero_id)?;
             let entry = session.find_effect(&catalog, hero_index, offsets::effects::DECK_KEYS)?;
             let hand = session.cards(&catalog, hero_index, entry)?;
-            let gem_count =
-                hand.iter().filter(|card| **card == offsets::effects::GEM_CARD).count();
+            let tally = |card_type: i64| hand.iter().filter(|card| **card == card_type).count();
 
-            if *gems {
-                println!("{gem_count}");
+            // Scriptable single number: --count <type>, or --gems for the one
+            // that started all this.
+            let wanted = match (count, gems) {
+                (Some(name), _) => Some(offsets::effects::card_type_by_name(name).ok_or_else(
+                    || {
+                        io::Error::other(format!(
+                            "unknown card type {name:?} (known: {})",
+                            offsets::effects::CARD_TYPES
+                                .iter()
+                                .map(|(_, card)| *card)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ))
+                    },
+                )?),
+                (None, true) => Some(offsets::effects::GEM_CARD),
+                (None, false) => None,
+            };
+            if let Some(card_type) = wanted {
+                println!("{}", tally(card_type));
                 return Ok(());
             }
+
             let named: Vec<&str> =
                 hand.iter().map(|card| offsets::effects::card_name(*card)).collect();
             println!("champion #{hero_id}, effect entry {entry}");
             println!("hand        {}", named.join(", "));
-            println!("gem cards   {gem_count}");
+            for (card_type, name) in offsets::effects::CARD_TYPES {
+                println!("{:<11} {}", name.to_lowercase(), tally(*card_type));
+            }
             Ok(())
         }
 

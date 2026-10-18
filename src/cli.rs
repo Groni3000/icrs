@@ -108,8 +108,13 @@ pub enum Command {
 
     /// Ellywick's hand from the Deck of Many Things
     Cards {
-        /// Print only how many Gem cards are in hand
-        #[arg(long)]
+        /// Print only how many cards of this type are in hand:
+        /// knight, moon, gem, fates, flames
+        #[arg(long, value_name = "TYPE")]
+        count: Option<String>,
+
+        /// Shorthand for --count gem
+        #[arg(long, conflicts_with = "count")]
         gems: bool,
 
         /// A different champion's deck-style handler, by id

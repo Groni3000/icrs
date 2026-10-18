@@ -308,19 +308,31 @@ pub mod effects {
     pub const DECK_KEYS: &[&str] =
         &["ellywick_deck_of_many_things", "ellywick_call_of_the_feywild"];
 
-    /// `CardType` as the game numbers it.
-    pub fn card_name(card_type: i64) -> &'static str {
-        match card_type {
-            1 => "Knight",
-            2 => "Moon",
-            3 => "Gem",
-            4 => "Fates",
-            5 => "Flames",
-            _ => "?",
-        }
-    }
+    /// `CardType` as the game numbers it. Gem raises the gem find, Moon the
+    /// gold find - the two worth holding a hand of.
+    pub const CARD_TYPES: &[(i64, &str)] =
+        &[(1, "Knight"), (2, "Moon"), (3, "Gem"), (4, "Fates"), (5, "Flames")];
 
     pub const GEM_CARD: i64 = 3;
+
+    pub fn card_name(card_type: i64) -> &'static str {
+        CARD_TYPES
+            .iter()
+            .find(|(number, _)| *number == card_type)
+            .map(|(_, name)| *name)
+            .unwrap_or("?")
+    }
+
+    /// Accepts "moon", "Moon", or the raw number.
+    pub fn card_type_by_name(name: &str) -> Option<i64> {
+        if let Ok(number) = name.parse::<i64>() {
+            return CARD_TYPES.iter().find(|(n, _)| *n == number).map(|(n, _)| *n);
+        }
+        CARD_TYPES
+            .iter()
+            .find(|(_, card)| card.eq_ignore_ascii_case(name))
+            .map(|(number, _)| *number)
+    }
 }
 
 /// The champion roster, for turning a name into an id.
