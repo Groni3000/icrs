@@ -382,6 +382,8 @@ mod tests {
         Snapshot {
             at: at(1000),
             took: Duration::from_millis(12),
+            reads: 31,
+            pointer_reads: 20,
             zone: Some(270),
             highest_zone: Some(86),
             quest_left: Some(4),

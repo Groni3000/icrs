@@ -7,12 +7,14 @@
 //! false. Here a failed read is a `None` plus a named miss, and every decision
 //! sees the same numbers.
 //!
-//! `Sampler` resolves its chains once. Resolving walks the import tree;
-//! reading is a handful of dereferences, so a tick stays cheap.
+//! `Sampler` resolves its chains once, then reads them in as few calls to the
+//! game as it can - `crate::batch` is where that happens, and why it matters.
 
 use std::time::{Duration, SystemTime};
 
 use crate::game::Ultimate;
+#[cfg(windows)]
+use crate::batch::{Batch, Walk};
 use crate::offsets;
 
 // Sampling needs an attached game, which is Win32 only. A `Snapshot` is plain
@@ -26,21 +28,19 @@ use crate::catalog::Chain;
 #[cfg(windows)]
 use crate::game::Game;
 
-#[cfg(windows)]
-/// The maximum hand in the Deck of Many Things.
-const MAX_CARDS: u64 = 5;
-
-#[cfg(windows)]
-/// Chains for the ultimates bar are built up front for this many slots; the
-/// live size is read each tick and only that many are sampled.
-const MAX_ULTIMATE_SLOTS: u64 = 16;
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct Snapshot {
     pub at: SystemTime,
     /// How long the sample took, which is also the window during which the
     /// values could disagree with each other.
     pub took: Duration,
+    /// Calls made to the game for this sample. Under Proton each one is a
+    /// round trip to the wineserver at ~18us, so this is the number that
+    /// decides `took` - see `crate::batch`.
+    pub reads: usize,
+    /// How many of those were spent following pointers rather than reading
+    /// values.
+    pub pointer_reads: usize,
 
     pub zone: Option<i64>,
     pub highest_zone: Option<i64>,
@@ -123,7 +123,11 @@ impl Snapshot {
             .unwrap_or(0.0);
 
         let mut out = String::new();
-        out.push_str(&format!("{{\"at\":{seconds:.3},\"took_ms\":{:.1}", self.took.as_secs_f64() * 1000.0));
+        out.push_str(&format!(
+            "{{\"at\":{seconds:.3},\"took_ms\":{:.1},\"reads\":{}",
+            self.took.as_secs_f64() * 1000.0,
+            self.reads
+        ));
         out.push_str(&format!(",\"zone\":{}", number(self.zone)));
         out.push_str(&format!(",\"highest_zone\":{}", number(self.highest_zone)));
         out.push_str(&format!(",\"bosses\":{}", number(self.bosses())));
@@ -138,8 +142,10 @@ impl Snapshot {
 
         match &self.cards {
             Some(hand) => {
-                let cards: Vec<String> =
-                    hand.iter().map(|card| format!("\"{}\"", offsets::effects::card_name(*card))).collect();
+                let cards: Vec<String> = hand
+                    .iter()
+                    .map(|card| format!("\"{}\"", offsets::effects::card_name(*card)))
+                    .collect();
                 out.push_str(&format!(",\"cards\":[{}]", cards.join(",")));
             }
             None => out.push_str(",\"cards\":null"),
@@ -164,22 +170,42 @@ impl Snapshot {
 }
 
 #[cfg(windows)]
-/// Resolved chains for one game, reused for every sample.
+/// The maximum hand in the Deck of Many Things.
+const MAX_CARDS: u64 = 5;
+
+#[cfg(windows)]
+/// Chains for the ultimates bar are built up front for this many slots; the
+/// live size is read each tick and only that many are sampled.
+const MAX_ULTIMATE_SLOTS: u64 = 16;
+
+/// Chains resolved once, and the slots each value comes back in.
+///
+/// A sample is two passes, because the second depends on the first: the
+/// ultimates bar and the hand have to be measured before we know how many
+/// entries to read. Both passes share one `Walk`, so the long prefix they have
+/// in common is dereferenced once for the whole tick.
+#[cfg(windows)]
 pub struct Sampler {
+    /// Everything whose address does not depend on this tick's own readings.
+    core: Batch,
     scalars: Vec<Scalar>,
-    ultimate_slots: Vec<UltimateChains>,
-    bar_size: Chain,
-    cards: Option<CardChains>,
+    bar_size: usize,
+    hand_size: Option<usize>,
+    /// Chains for every slot the bar might have and every card she might
+    /// hold; which of them to read is decided per tick from the counts above.
+    ultimates: Vec<UltimateChains>,
+    cards: Option<Vec<Chain>>,
     /// Why something is not being sampled, said once at startup rather than
     /// every tick.
     pub notes: Vec<String>,
 }
 
+/// A simple value: where it lands in a snapshot, and what to call it if it
+/// does not arrive.
 #[cfg(windows)]
-/// A simple value and where it belongs in a snapshot.
 struct Scalar {
+    slot: usize,
     label: &'static str,
-    chain: Chain,
     place: Place,
 }
 
@@ -209,44 +235,43 @@ struct UltimateChains {
 }
 
 #[cfg(windows)]
-struct CardChains {
-    size: Chain,
-    types: Vec<Chain>,
-}
-
-#[cfg(windows)]
 impl Sampler {
     /// Resolve everything a sample needs. The champion and effect-key lookups
     /// happen here, once - they are the expensive part, hundreds of reads.
     pub fn new(game: &Game) -> io::Result<Self> {
         use Place::*;
 
-        let scalar = |label: &'static str, place: Place| -> io::Result<Scalar> {
+        let module = game.module();
+        let mut core = Batch::new();
+        let mut scalars = Vec::new();
+
+        for (label, place) in [
+            ("zone", Zone),
+            ("highest_zone", HighestZone),
+            ("quest_left", QuestLeft),
+            ("transitioning", Transitioning),
+            ("modron_target", ModronTarget),
+            ("steelbones", Steelbones),
+            ("sprint", Sprint),
+            ("resets", Resets),
+            ("gems", Gems),
+            ("since_hit", SinceHit),
+        ] {
             let path = offsets::NAMED
                 .iter()
                 .find(|want| want.label == label)
                 .ok_or_else(|| io::Error::other(format!("no such label: {label}")))?
                 .path;
-            Ok(Scalar { label, chain: game.chain(path, &[])?, place })
-        };
+            let chain = game.chain(path, &[])?;
+            scalars.push(Scalar { slot: core.push_chain(module, &chain), label, place });
+        }
 
-        let scalars = vec![
-            scalar("zone", Zone)?,
-            scalar("highest_zone", HighestZone)?,
-            scalar("quest_left", QuestLeft)?,
-            scalar("transitioning", Transitioning)?,
-            scalar("modron_target", ModronTarget)?,
-            scalar("steelbones", Steelbones)?,
-            scalar("sprint", Sprint)?,
-            scalar("resets", Resets)?,
-            scalar("gems", Gems)?,
-            scalar("since_hit", SinceHit)?,
-        ];
+        let bar_size = core.push_chain(module, &game.chain(offsets::ultimates::SIZE, &[])?);
 
-        let mut ultimate_slots = Vec::new();
+        let mut ultimates = Vec::new();
         for slot in 0..MAX_ULTIMATE_SLOTS {
             let at = [0, slot];
-            ultimate_slots.push(UltimateChains {
+            ultimates.push(UltimateChains {
                 slot,
                 hero_id: game.chain(offsets::ultimates::HERO_ID, &at)?,
                 hotkey: game.chain(offsets::ultimates::HOTKEY, &at)?,
@@ -256,25 +281,20 @@ impl Sampler {
         }
 
         let mut notes = Vec::new();
-        let cards = match Self::resolve_cards(game) {
-            Ok(chains) => Some(chains),
+        let (hand_size, cards) = match Self::resolve_cards(game) {
+            Ok((size, types)) => (Some(core.push_chain(module, &size)), Some(types)),
             Err(err) => {
                 notes.push(format!("cards not tracked: {err}"));
-                None
+                (None, None)
             }
         };
 
-        Ok(Self {
-            scalars,
-            ultimate_slots,
-            bar_size: game.chain(offsets::ultimates::SIZE, &[])?,
-            cards,
-            notes,
-        })
+        Ok(Self { core, scalars, bar_size, hand_size, ultimates, cards, notes })
     }
 
-    /// Ellywick's deck, if she is in the formation with the handler loaded.
-    fn resolve_cards(game: &Game) -> io::Result<CardChains> {
+    /// Ellywick's deck, if she is in the formation with the handler loaded:
+    /// the chain for the size of her hand, and one per card she could hold.
+    fn resolve_cards(game: &Game) -> io::Result<(Chain, Vec<Chain>)> {
         let hero = game.hero_index(offsets::effects::ELLYWICK_HERO_ID)?;
         let entry = game.find_effect(hero, offsets::effects::DECK_KEYS)?;
         let at = [0, hero, entry, 0, 0];
@@ -283,7 +303,7 @@ impl Sampler {
             let at = [0, hero, entry, 0, 0, card];
             types.push(game.chain(offsets::effects::CARD_TYPE, &at)?);
         }
-        Ok(CardChains { size: game.chain(offsets::effects::CARDS, &at)?, types })
+        Ok((game.chain(offsets::effects::CARDS, &at)?, types))
     }
 
     pub fn tracks_cards(&self) -> bool {
@@ -300,6 +320,8 @@ impl Sampler {
         let mut snapshot = Snapshot {
             at,
             took: Duration::ZERO,
+            reads: 0,
+            pointer_reads: 0,
             zone: None,
             highest_zone: None,
             quest_left: None,
@@ -315,9 +337,11 @@ impl Sampler {
             misses: Vec::new(),
         };
 
+        let mut walk = Walk::new(game.process());
+        let core = walk.values(&self.core);
+
         for scalar in &self.scalars {
-            let read = game.read(&scalar.chain);
-            let Ok(value) = read else {
+            let Some(value) = &core[scalar.slot] else {
                 snapshot.misses.push(scalar.label.to_string());
                 continue;
             };
@@ -335,54 +359,73 @@ impl Sampler {
             }
         }
 
-        match game.read(&self.bar_size).ok().and_then(|value| value.as_i64()) {
+        // Second pass: now that the counts are known, read exactly as many
+        // bar slots and cards as there actually are.
+        let module = game.module();
+        let mut rest = Batch::new();
+
+        let bar = core[self.bar_size].as_ref().and_then(|value| value.as_i64());
+        let mut bar_slots = Vec::new();
+        match bar {
             Some(size) => {
-                for chains in self.ultimate_slots.iter().take(size.clamp(0, 64) as usize) {
-                    if let Some(entry) = chains.read(game) {
-                        snapshot.ultimates.push(entry);
-                    }
+                for chains in self.ultimates.iter().take(size.clamp(0, 64) as usize) {
+                    bar_slots.push((
+                        chains.slot,
+                        rest.push_chain(module, &chains.hero_id),
+                        rest.push_chain(module, &chains.hotkey),
+                        rest.push_chain(module, &chains.cooldown),
+                        rest.push_chain(module, &chains.queued),
+                    ));
                 }
             }
             None => snapshot.misses.push("ultimates".to_string()),
         }
 
-        if let Some(cards) = &self.cards {
-            match cards.read(game) {
-                Some(hand) => snapshot.cards = Some(hand),
-                None => snapshot.misses.push("cards".to_string()),
+        let held = self
+            .hand_size
+            .and_then(|slot| core[slot].as_ref().and_then(|value| value.as_i64()));
+        let mut card_slots = Vec::new();
+        match (&self.cards, held) {
+            (Some(chains), Some(size)) if (0..=MAX_CARDS as i64).contains(&size) => {
+                for chain in chains.iter().take(size as usize) {
+                    card_slots.push(rest.push_chain(module, chain));
+                }
+            }
+            (Some(_), _) => snapshot.misses.push("cards".to_string()),
+            (None, _) => {}
+        }
+
+        let rest = walk.values(&rest);
+
+        for (slot, hero_id, hotkey, cooldown, queued) in bar_slots {
+            let (Some(hero_id), Some(hotkey), Some(cooldown)) = (
+                rest[hero_id].as_ref().and_then(|value| value.as_i64()),
+                rest[hotkey].as_ref().and_then(|value| value.as_i64()),
+                rest[cooldown].as_ref().and_then(|value| value.as_f64()),
+            ) else {
+                continue;
+            };
+            let queued =
+                rest[queued].as_ref().and_then(|value| value.as_bool()).unwrap_or(false);
+            snapshot.ultimates.push(Ultimate { slot, hero_id, hotkey, cooldown, queued });
+        }
+
+        if !card_slots.is_empty() || (self.cards.is_some() && held == Some(0)) {
+            let hand: Vec<i64> = card_slots
+                .iter()
+                .filter_map(|slot| rest[*slot].as_ref().and_then(|value| value.as_i64()))
+                .collect();
+            if hand.len() == card_slots.len() {
+                snapshot.cards = Some(hand);
+            } else {
+                snapshot.misses.push("cards".to_string());
             }
         }
 
+        snapshot.reads = walk.calls();
+        snapshot.pointer_reads = walk.pointers();
         snapshot.took = started.elapsed();
         snapshot
-    }
-}
-
-#[cfg(windows)]
-impl UltimateChains {
-    fn read(&self, game: &Game) -> Option<Ultimate> {
-        Some(Ultimate {
-            slot: self.slot,
-            hero_id: game.read(&self.hero_id).ok()?.as_i64()?,
-            hotkey: game.read(&self.hotkey).ok()?.as_i64()?,
-            cooldown: game.read(&self.cooldown).ok()?.as_f64()?,
-            queued: game.read(&self.queued).ok().and_then(|v| v.as_bool()).unwrap_or(false),
-        })
-    }
-}
-
-#[cfg(windows)]
-impl CardChains {
-    fn read(&self, game: &Game) -> Option<Vec<i64>> {
-        let size = game.read(&self.size).ok()?.as_i64()?;
-        if !(0..=MAX_CARDS as i64).contains(&size) {
-            return None;
-        }
-        let mut hand = Vec::new();
-        for chain in self.types.iter().take(size as usize) {
-            hand.push(game.read(chain).ok()?.as_i64()?);
-        }
-        Some(hand)
     }
 }
 
@@ -396,6 +439,8 @@ mod tests {
         Snapshot {
             at: SystemTime::UNIX_EPOCH,
             took: Duration::from_millis(3),
+            reads: 31,
+            pointer_reads: 20,
             zone: Some(270),
             highest_zone: Some(86),
             quest_left: Some(4),

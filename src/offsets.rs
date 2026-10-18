@@ -69,6 +69,17 @@ pub enum Kind {
 }
 
 impl Kind {
+    /// How many bytes the field occupies in its parent object. A string is a
+    /// pointer, and following it is a separate read.
+    pub fn size(self) -> usize {
+        match self {
+            Kind::U8 => 1,
+            Kind::I32 | Kind::F32 => 4,
+            Kind::I64 | Kind::F64 | Kind::Utf16 => 8,
+            Kind::Quad => 16,
+        }
+    }
+
     /// Map an import file's declared type onto a reader.
     pub fn from_value_type(value_type: &str) -> Option<Self> {
         match value_type {

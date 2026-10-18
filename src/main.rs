@@ -386,10 +386,18 @@ fn run(cli: &Cli) -> io::Result<()> {
                 "building the chain from the imports    {:>8.1} us  (no game access at all)",
                 per(resolved, reads)
             );
+            let sample = sampler.take(&game);
             println!(
-                "\none full sample ({values} values)         {:>8.0} us  = {:.1} reads' worth",
+                "\none full sample ({values} values)         {:>8.0} us  in {} call(s): {} pointer hops + {} object reads",
                 per(sampled, ticks),
-                per(sampled, ticks) / per(raw, reads)
+                sample.reads,
+                sample.pointer_reads,
+                sample.reads - sample.pointer_reads
+            );
+            println!(
+                "   one value at a time would be        {:>8.0} us  in {:.0} call(s)",
+                per(walked, reads) * values as f64,
+                per(walked, reads) * values as f64 / per(raw, reads)
             );
             println!(
                 "\nat tick 250ms that is {:.1}% of the time, and a 60fps frame is 16667us",
@@ -707,7 +715,11 @@ fn show(game: &Game, snapshot: &Snapshot) {
         );
     }
 
-    println!("\nsampled in {:.1}ms", snapshot.took.as_secs_f64() * 1000.0);
+    println!(
+        "\nsampled in {:.1}ms with {} read(s)",
+        snapshot.took.as_secs_f64() * 1000.0,
+        snapshot.reads
+    );
     if !snapshot.healthy() {
         println!("did not read: {}", snapshot.misses.join(", "));
     }
