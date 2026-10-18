@@ -4,3 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+
+# The real binary is always a Windows PE: on Linux it runs inside the game's
+# Proton container so it shares a wineserver with IdleDragons.exe, which is
+# what makes ReadProcessMemory and PostMessage reach the game at all.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_ToolHelp",
+] }
