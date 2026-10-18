@@ -1,0 +1,7 @@
+this.UserID:=New IBM_GOS(this.CrusadersGame.GameSettings,"Int",[this.StaticOffset+96])
+this.Hash:=New IBM_GOS(this.CrusadersGame.GameSettings,"UTF-16",[this.StaticOffset+104])
+this.Platform:=New IBM_GOS(this.CrusadersGame.GameSettings,"Int",[this.StaticOffset+208])
+this.MobileClientVersion:=New IBM_GOS(this.CrusadersGame.GameSettings,"Int",[this.StaticOffset+224])
+this.VersionPostFix:=New IBM_GOS(this.CrusadersGame.GameSettings,"UTF-16",[this.StaticOffset+232])
+this._instance:=New IBM_GOS(this.CrusadersGame.GameSettings,"Int",[this.StaticOffset])
+this._instance.instanceID:=New IBM_GOS(this._instance,"Int64",[24])

@@ -1,0 +1,37 @@
+{
+	"EngineSettings": {
+		"moduleAddress": 7643384,
+		"moduleOffset": [
+			672,
+			2688,
+			176,
+			1176,
+			64
+		],
+		"staticOffset": 80
+	},
+	"GameSettings": {
+		"moduleAddress": 10564936,
+		"moduleOffset": [
+			352,
+			2152,
+			160,
+			432
+		],
+		"staticOffset": 592
+	},
+	"IdleGameManager": {
+		"moduleAddress": 7655936,
+		"moduleOffset": [
+			3872
+		],
+		"staticOffset": ""
+	},
+	"Import_Revision": "A",
+	"Import_Version_Major": 657,
+	"Import_Version_Minor": "",
+	"Platform": "11",
+	"Pointer_Revision": "A",
+	"Pointer_Version_Major": 654,
+	"Pointer_Version_Minor": ""
+}

@@ -76,6 +76,40 @@ impl Process {
         Ok(i32::from_le_bytes(buf))
     }
 
+    pub fn read_i64(&self, address: u64) -> io::Result<i64> {
+        let mut buf = [0u8; 8];
+        self.read_into(address, &mut buf)?;
+        Ok(i64::from_le_bytes(buf))
+    }
+
+    /// Read a Mono string through the pointer stored at `address`.
+    ///
+    /// Layout: the object header is `0x10` bytes, then a 4-byte length (in
+    /// UTF-16 code units), then the characters. An implausible length means we
+    /// are not looking at a string object, which is worth saying out loud
+    /// rather than returning the mojibake it would decode to.
+    pub fn read_mono_string(&self, address: u64) -> io::Result<String> {
+        const MAX_UNITS: i32 = 4096;
+
+        let object = self.read_u64(address)?;
+        if object == 0 {
+            return Err(io::Error::other("null string pointer"));
+        }
+        let units = self.read_i32(object + 0x10)?;
+        if !(0..=MAX_UNITS).contains(&units) {
+            return Err(io::Error::other(format!(
+                "string at {object:#x} claims length {units} - not a Mono string"
+            )));
+        }
+        let mut bytes = vec![0u8; units as usize * 2];
+        self.read_into(object + 0x14, &mut bytes)?;
+        let wide: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        Ok(String::from_utf16_lossy(&wide))
+    }
+
     /// Load address of a module (e.g. `mono-2.0-bdwgc.dll`) in this process.
     pub fn module_base(&self, module_name: &str) -> io::Result<u64> {
         use std::mem::{size_of, zeroed};
@@ -147,6 +181,44 @@ impl Process {
         }
         Ok(addr)
     }
+
+    /// Walk the chain recording every hop, stopping at the first failure.
+    ///
+    /// `resolve` names the step that broke; this shows the addresses either
+    /// side of it, which is what distinguishes "the static address moved"
+    /// (dies at hop 0 or 1) from "a field moved in this build" (dies deep,
+    /// after plausible pointers).
+    pub fn trace(&self, base: u64, offsets: &[u64]) -> Vec<Hop> {
+        let mut hops = Vec::with_capacity(offsets.len());
+        let mut addr = base;
+        for &offset in offsets {
+            let read = self.read_u64(addr);
+            let hop = Hop {
+                at: addr,
+                offset,
+                value: read.as_ref().ok().copied(),
+            };
+            let broken = hop.value.is_none_or(|value| value == 0);
+            hops.push(hop);
+            if broken {
+                break;
+            }
+            addr = hops.last().unwrap().value.unwrap() + offset;
+        }
+        hops
+    }
+}
+
+/// One dereference in a pointer walk: what was read, and from where.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy)]
+pub struct Hop {
+    /// The address dereferenced.
+    pub at: u64,
+    /// The offset added to the result.
+    pub offset: u64,
+    /// The pointer read, or `None` if the address was not readable.
+    pub value: Option<u64>,
 }
 
 #[cfg(windows)]

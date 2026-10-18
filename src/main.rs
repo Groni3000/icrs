@@ -28,32 +28,33 @@ fn run() -> std::io::Result<()> {
 
     let game = Process::open(pid)?;
     let module = game.module_base(offsets::MONO_MODULE)?;
-    let base = module + offsets::IDLE_GAME_MANAGER;
 
-    println!("pid        {}", game.pid());
-    println!(
-        "{:<10} {:#x}  (+{:#x} -> {:#x})",
-        offsets::MONO_MODULE,
-        module,
-        offsets::IDLE_GAME_MANAGER,
-        base
-    );
+    println!("pid         {}", game.pid());
+    println!("{:<11} {:#x}", offsets::MONO_MODULE, module);
 
     let window = input::Window::for_process(pid)?;
     println!(
-        "window     {:#x}{}",
+        "window      {:#x}{}",
         window.hwnd(),
         if window.is_foreground() { " (foreground)" } else { " (not foreground)" }
     );
 
+    // A stale root breaks every chain hanging off it, so the hop trace is
+    // printed once per root instead of once per chain.
+    let mut traced: Vec<&str> = Vec::new();
+    let mut root = "";
     for chain in offsets::ALL {
-        match game
-            .resolve(base, chain.offsets)
-            .and_then(|addr| game.read_i32(addr))
-        {
-            Ok(value) => println!("{:<10} {value}", chain.label),
-            Err(err) => println!("{:<10} unreadable: {err}", chain.label),
+        if chain.root.name != root {
+            root = chain.root.name;
+            let hops: Vec<String> =
+                chain.root.module_offset.iter().map(|o| format!("{o:#x}")).collect();
+            println!(
+                "\n{root}  (mono+{:#x} -> {})",
+                chain.root.module_address,
+                hops.join(" -> ")
+            );
         }
+        report(&game, chain, module, &mut traced);
     }
 
     // Optional: icrs <key>  e.g. `cargo run -- esc`
@@ -66,7 +67,41 @@ fn run() -> std::io::Result<()> {
         })?;
         window.nudge_active()?;
         window.tap(key)?;
-        println!("sent       {} (vk {:#04x}, scan {})", key.name, key.vk, key.scan);
+        println!("\nsent        {} (vk {:#04x}, scan {})", key.name, key.vk, key.scan);
     }
     Ok(())
+}
+
+/// Read one chain and print it; on failure, show where the walk died.
+fn report(game: &Process, chain: &offsets::Chain, module_base: u64, traced: &mut Vec<&'static str>) {
+    let base = chain.base(module_base);
+    let full = chain.full();
+
+    let value = game.resolve(base, &full).and_then(|addr| match chain.kind {
+        offsets::Kind::I32 => game.read_i32(addr).map(|v| v.to_string()),
+        offsets::Kind::I64 => game.read_i64(addr).map(|v| v.to_string()),
+        offsets::Kind::Utf16 => game.read_mono_string(addr).map(|v| format!("{v:?}")),
+    });
+
+    match value {
+        Ok(value) => println!("  {:<12} {value}", chain.label),
+        Err(err) => {
+            println!("  {:<12} UNREADABLE: {err}", chain.label);
+            if traced.contains(&chain.root.name) {
+                return;
+            }
+            traced.push(chain.root.name);
+            for (step, hop) in game.trace(base, &full).iter().enumerate() {
+                match hop.value {
+                    Some(value) => println!(
+                        "    hop {step}: [{:#x}] = {value:#x}  +{:#x} -> {:#x}",
+                        hop.at,
+                        hop.offset,
+                        value + hop.offset
+                    ),
+                    None => println!("    hop {step}: [{:#x}] unreadable", hop.at),
+                }
+            }
+        }
+    }
 }
