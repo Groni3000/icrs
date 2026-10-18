@@ -1,6 +1,8 @@
 //! Finding the game process.
 
 use std::io;
+#[cfg(windows)]
+use std::path::PathBuf;
 
 /// PIDs of every running process whose image name matches `exe_name`
 /// (case-insensitively), in the order the OS reports them.
@@ -53,6 +55,40 @@ pub fn find_pids(exe_name: &str) -> io::Result<Vec<u32>> {
     }
 }
 
+/// Full path of a process's own image, e.g. `C:\\...\\IdleDragons.exe`.
+///
+/// Used to find the game's install directory - the version file sits next to
+/// the exe - so nothing has to be configured by hand.
+#[cfg(windows)]
+pub fn exe_path(pid: u32) -> io::Result<PathBuf> {
+    use std::mem::size_of;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, MODULEENTRY32W, Module32FirstW, TH32CS_SNAPMODULE,
+        TH32CS_SNAPMODULE32,
+    };
+
+    // SAFETY: the first module in a process's module snapshot is the process
+    // image itself; the handle is checked and closed on every path.
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        let mut entry = MODULEENTRY32W {
+            dwSize: size_of::<MODULEENTRY32W>() as u32,
+            ..std::mem::zeroed()
+        };
+        if Module32FirstW(snapshot, &mut entry) == 0 {
+            let err = io::Error::last_os_error();
+            CloseHandle(snapshot);
+            return Err(err);
+        }
+        CloseHandle(snapshot);
+        Ok(PathBuf::from(image_name(&entry.szExePath)))
+    }
+}
+
 /// Decode a fixed-size, NUL-terminated UTF-16 image name.
 #[cfg(windows)]
 fn image_name(raw: &[u16]) -> String {
@@ -61,9 +97,19 @@ fn image_name(raw: &[u16]) -> String {
 }
 
 #[cfg(not(windows))]
+pub fn exe_path(_pid: u32) -> io::Result<std::path::PathBuf> {
+    Err(unsupported())
+}
+
+#[cfg(not(windows))]
 pub fn find_pids(_exe_name: &str) -> io::Result<Vec<u32>> {
-    Err(io::Error::other(
+    Err(unsupported())
+}
+
+#[cfg(not(windows))]
+fn unsupported() -> io::Error {
+    io::Error::other(
         "icrs must be built for Windows (--target x86_64-pc-windows-gnu); \
          on Linux run the resulting .exe with scripts/run-in-prefix.sh",
-    ))
+    )
 }

@@ -70,6 +70,8 @@ pub enum Error {
     Syntax { line: usize, reason: String },
     UnknownPath(String),
     CycleAt(String),
+    /// A collection this crate cannot index yet sits in the middle of the path.
+    Unsupported { path: String, value_type: String },
 }
 
 impl fmt::Display for Error {
@@ -78,11 +80,23 @@ impl fmt::Display for Error {
             Error::Syntax { line, reason } => write!(f, "line {line}: {reason}"),
             Error::UnknownPath(path) => write!(f, "no such path: {path}"),
             Error::CycleAt(path) => write!(f, "offset chain loops at: {path}"),
+            Error::Unsupported { path, value_type } => write!(
+                f,
+                "{path} is a {value_type}, which needs its own read logic to index into"
+            ),
         }
     }
 }
 
 impl std::error::Error for Error {}
+
+/// What one [`Imports::load`] call did, so an overlay replacing an upstream
+/// path cannot pass unnoticed.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Load {
+    pub added: usize,
+    pub replaced: Vec<String>,
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct Imports {
@@ -96,7 +110,8 @@ impl Imports {
 
     /// Parse one import file, merging into whatever is already loaded, so a
     /// set of files (IdleGameManager, GameSettings, ...) forms one namespace.
-    pub fn load(&mut self, source: &str) -> Result<(), Error> {
+    pub fn load(&mut self, source: &str) -> Result<Load, Error> {
+        let mut load = Load::default();
         for (index, raw) in source.lines().enumerate() {
             let line = strip_comment(raw).trim();
             if line.is_empty() {
@@ -124,10 +139,13 @@ impl Imports {
                 self.node_mut(base, number)?.array_dimensions = Some(dims as u32);
             } else {
                 let node = parse_constructor(rhs, number)?;
-                self.nodes.insert(path.to_string(), node);
+                match self.nodes.insert(path.to_string(), node) {
+                    Some(_) => load.replaced.push(path.to_string()),
+                    None => load.added += 1,
+                }
             }
         }
-        Ok(())
+        Ok(load)
     }
 
     pub fn get(&self, path: &str) -> Option<&Node> {
@@ -174,6 +192,70 @@ impl Imports {
             current = &node.parent;
         }
         Err(Error::CycleAt(path.to_string()))
+    }
+
+    /// Like [`Imports::resolve`], but splices in the hops needed to index
+    /// through any collection the path crosses.
+    ///
+    /// The import files describe `gameInstances` as a `List` and stop there -
+    /// they do not say how a `List<T>` is laid out, because that is Mono's
+    /// business, not the game's. So the layout lives here: `_items` at
+    /// `0x10`, then element `i` at `0x20 + i * 8`.
+    ///
+    /// `indices` supplies one index per collection crossed, outermost first;
+    /// missing entries default to 0, which is the game instance we always
+    /// want.
+    pub fn resolve_at(&self, path: &str, indices: &[u64]) -> Result<Resolved, Error> {
+        const LIST_ITEMS: u64 = 0x10;
+        const LIST_ELEMENT_0: u64 = 0x20;
+
+        let leaf = self
+            .nodes
+            .get(path)
+            .ok_or_else(|| Error::UnknownPath(path.to_string()))?;
+
+        // Walk up to the root, remembering each node so the splice can see
+        // which of them is a collection.
+        let mut chain: Vec<(&str, &Node)> = Vec::new();
+        let mut current = path;
+        let root = loop {
+            match self.nodes.get(current) {
+                Some(node) => {
+                    if chain.len() > self.nodes.len() {
+                        return Err(Error::CycleAt(path.to_string()));
+                    }
+                    chain.push((current, node));
+                    current = &node.parent;
+                }
+                None => break current.to_string(),
+            }
+        };
+        chain.reverse();
+
+        let mut offsets = Vec::new();
+        let mut indices = indices.iter().copied();
+        for (position, (node_path, node)) in chain.iter().enumerate() {
+            offsets.extend(node.offsets.iter().copied());
+            if position + 1 == chain.len() {
+                break; // the leaf is read, not indexed into
+            }
+            match node.value_type.as_str() {
+                "List" => {
+                    let index = indices.next().unwrap_or(0);
+                    offsets.push(Offset::Fixed(LIST_ITEMS));
+                    offsets.push(Offset::Fixed(LIST_ELEMENT_0 + index * 8));
+                }
+                "Dict" | "HashSet" | "Stack" | "Queue" => {
+                    return Err(Error::Unsupported {
+                        path: node_path.to_string(),
+                        value_type: node.value_type.clone(),
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        Ok(Resolved { root, offsets, value_type: leaf.value_type.clone() })
     }
 
     fn node_mut(&mut self, path: &str, line: usize) -> Result<&mut Node, Error> {
@@ -384,5 +466,60 @@ this.anchor:=New IBM_GOS(this.CrusadersGame.GameSettings,"Int",[this.StaticOffse
             .load(r#"this.x:=New IBM_GOS(this.root,"Int",[lol])"#)
             .unwrap_err();
         assert!(matches!(err, Error::Syntax { .. }), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod indexing_tests {
+    use super::*;
+
+    const LIST_FILE: &str = r#"
+this.game:=New IBM_GOS(this.IdleGameManager,"Int",[224])
+this.game.gameInstances:=New IBM_GOS(this.game,"List",[176])
+this.game.gameInstances.zone:=New IBM_GOS(this.game.gameInstances,"Int",[40])
+this.game.bag:=New IBM_GOS(this.game,"Dict",[48])
+this.game.bag.count:=New IBM_GOS(this.game.bag,"Int",[16])
+"#;
+
+    fn imports() -> Imports {
+        let mut imports = Imports::new();
+        imports.load(LIST_FILE).unwrap();
+        imports
+    }
+
+    #[test]
+    fn splices_list_indexing() {
+        let imports = imports();
+        // element 0: _items at 0x10, then 0x20
+        assert_eq!(
+            imports.resolve_at("game.gameInstances.zone", &[]).unwrap().fixed(0),
+            vec![224, 176, 0x10, 0x20, 40]
+        );
+        // element 3 is 8 bytes per element further in
+        assert_eq!(
+            imports.resolve_at("game.gameInstances.zone", &[3]).unwrap().fixed(0),
+            vec![224, 176, 0x10, 0x20 + 24, 40]
+        );
+    }
+
+    #[test]
+    fn a_list_at_the_end_of_the_path_is_not_indexed() {
+        let imports = imports();
+        assert_eq!(
+            imports.resolve_at("game.gameInstances", &[]).unwrap().fixed(0),
+            vec![224, 176]
+        );
+    }
+
+    #[test]
+    fn unsupported_collections_say_so_instead_of_reading_garbage() {
+        let imports = imports();
+        match imports.resolve_at("game.bag.count", &[]) {
+            Err(Error::Unsupported { path, value_type }) => {
+                assert_eq!(path, "game.bag");
+                assert_eq!(value_type, "Dict");
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
     }
 }

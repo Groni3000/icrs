@@ -11,3 +11,8 @@ These files are generated AutoHotkey source, parsed by `src/imports.rs` for
 the offsets only. Two dialects exist and both are accepted: upstream's
 `New IBM_GOS(...)` with decimal offsets, and IC Script Hub's
 `New GameObjectStructure(...)` with hex.
+
+`extra.ahk` is not upstream. It is a local overlay holding paths the feed does
+not generate, loaded last so it wins; the loader counts how many upstream paths
+it replaces and that count is asserted to be zero, so an overlay entry cannot
+silently shadow a newer upstream one. See `docs/updating-offsets.md`.

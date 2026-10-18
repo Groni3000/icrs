@@ -76,6 +76,24 @@ impl Process {
         Ok(i32::from_le_bytes(buf))
     }
 
+    pub fn read_u8(&self, address: u64) -> io::Result<u8> {
+        let mut buf = [0u8; 1];
+        self.read_into(address, &mut buf)?;
+        Ok(buf[0])
+    }
+
+    pub fn read_f32(&self, address: u64) -> io::Result<f32> {
+        let mut buf = [0u8; 4];
+        self.read_into(address, &mut buf)?;
+        Ok(f32::from_le_bytes(buf))
+    }
+
+    pub fn read_f64(&self, address: u64) -> io::Result<f64> {
+        let mut buf = [0u8; 8];
+        self.read_into(address, &mut buf)?;
+        Ok(f64::from_le_bytes(buf))
+    }
+
     pub fn read_i64(&self, address: u64) -> io::Result<i64> {
         let mut buf = [0u8; 8];
         self.read_into(address, &mut buf)?;

@@ -50,13 +50,33 @@ pub const ENGINE_SETTINGS: Root = Root {
 const GAME_SETTINGS_STATIC: u64 = 0x250;
 const ENGINE_SETTINGS_STATIC: u64 = 0x50;
 
-/// How to read the value once the chain lands on its field.
+/// How to read the value once the chain lands on its field. These mirror the
+/// type names the import files declare.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     I32,
     I64,
+    /// `Char` in the import files: a one-byte flag, not a character.
+    U8,
+    F32,
+    F64,
     /// A Mono string: the field holds a pointer to the string object.
     Utf16,
+}
+
+impl Kind {
+    /// Map an import file's declared type onto a reader.
+    pub fn from_value_type(value_type: &str) -> Option<Self> {
+        match value_type {
+            "Int" => Some(Kind::I32),
+            "Int64" | "Quad" => Some(Kind::I64),
+            "Char" => Some(Kind::U8),
+            "Float" => Some(Kind::F32),
+            "Double" => Some(Kind::F64),
+            "UTF-16" => Some(Kind::Utf16),
+            _ => None,
+        }
+    }
 }
 
 /// A pointer chain: dereference each offset in turn, then read the value.
@@ -141,7 +161,53 @@ pub const WEB_ROOT: Chain = Chain {
     kind: Kind::Utf16,
 };
 
-/// Every chain the probe reports, in display order.
+/// A value to read, named by path rather than by offset. The chain is built
+/// from the loaded drop at run time; the constants above exist only as the
+/// hand-verified anchors the parser is tested against.
+#[derive(Debug, Clone, Copy)]
+pub struct Want {
+    pub label: &'static str,
+    pub path: &'static str,
+    /// One index per collection the path crosses, outermost first. Empty means
+    /// element 0 everywhere, which is the game instance we always use.
+    pub indices: &'static [u64],
+    /// Inclusive bounds a healthy read must fall inside. A value outside them
+    /// means the chain landed somewhere plausible-looking but wrong, which no
+    /// version check can catch.
+    pub sane: Option<(i64, i64)>,
+}
+
+/// What the probe reads, in display order.
+pub const WANTED: &[Want] = &[
+    Want {
+        label: "zone",
+        path: "game.gameInstances.ActiveCampaignData.currentAreaID",
+        indices: &[],
+        // -1 is the world map, which the AHK script treats as a real state.
+        sane: Some((-1, 100_000)),
+    },
+    Want {
+        label: "steelbones",
+        path: "game.gameInstances.Controller.userData.StatHandler.BrivSteelbonesStacks",
+        indices: &[],
+        sane: Some((0, 10_000_000)),
+    },
+    Want {
+        label: "gems",
+        path: "game.gameInstances.Controller.userData.redRubies",
+        indices: &[],
+        sane: Some((0, 1_000_000_000)),
+    },
+    // Officially these two live on GameSettings, whose pointer path is stale;
+    // this is the route the AHK script falls back to.
+    Want { label: "user_id", path: "game.gameUser.ID", indices: &[], sane: Some((1, i64::MAX)) },
+    Want { label: "hash", path: "game.gameUser.Hash", indices: &[], sane: None },
+    // Expected to fail on V657 - see docs/pointer-chains.md.
+    Want { label: "instance_id", path: "_instance.instanceID", indices: &[], sane: None },
+    Want { label: "web_root", path: "WebRoot", indices: &[], sane: None },
+];
+
+/// Every hardcoded chain, in display order.
 pub const ALL: &[Chain] = &[
     CURRENT_ZONE,
     STEELBONES_STACKS,
