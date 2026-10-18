@@ -1,4 +1,5 @@
 pub mod catalog;
+pub mod cli;
 pub mod imports;
 pub mod input;
 pub mod json;

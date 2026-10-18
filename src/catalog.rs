@@ -255,6 +255,22 @@ impl Catalog {
         self.imports.len()
     }
 
+    /// Paths containing `filter` (case-insensitive) with their declared type,
+    /// so the drop can be explored without the game running.
+    pub fn search(&self, filter: Option<&str>) -> Vec<(&str, &str)> {
+        let needle = filter.map(str::to_lowercase);
+        self.imports
+            .paths()
+            .filter(|path| match &needle {
+                Some(needle) => path.to_lowercase().contains(needle),
+                None => true,
+            })
+            .filter_map(|path| {
+                self.imports.get(path).map(|node| (path, node.value_type.as_str()))
+            })
+            .collect()
+    }
+
     /// Turn a dotted path into a chain, indexing collections with `indices`
     /// (outermost first, 0 where omitted).
     pub fn chain(&self, label: &str, path: &str, indices: &[u64]) -> Result<Chain, Error> {

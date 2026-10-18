@@ -9,7 +9,7 @@ One command works on both hosts:
 
 ```
 ./scripts/cargo.sh run --release            # probe
-./scripts/cargo.sh run --release -- q       # probe, then send a key
+./scripts/cargo.sh run --release -- info    # any subcommand after --
 ```
 
 On Linux it launches the exe inside the game's Proton container; on Windows it
@@ -21,6 +21,9 @@ is a plain passthrough to cargo. What follows is what that does per host.
 rustup target add x86_64-pc-windows-gnu     # once
 cargo run --release                         # works directly, no wrapper needed
 ```
+
+Double-clicking the exe runs `probe` and then waits for Enter, so the console
+window does not vanish.
 
 Or run the built exe straight: `target\x86_64-pc-windows-gnu\release\icrs.exe`.
 
@@ -46,6 +49,32 @@ with no container at all:
 ```
 cargo test --lib --target x86_64-unknown-linux-gnu      # 27 tests, game closed
 ./scripts/cargo.sh test                                 # everything, game open
+```
+
+## Commands
+
+```
+icrs                     probe (the default)
+icrs probe               read every known value once, flagging implausible ones
+icrs info                the loaded drop, its version vs the game's, each root's health
+icrs read <target>       one value, by probe label or dotted path  (--bare, --index)
+icrs watch [targets...]  print repeatedly                          (--interval, --count)
+icrs paths [filter]      explore the loaded drop - no game needed  (--limit)
+icrs key <keys...>       send keystrokes without focusing the game (--delay)
+```
+
+Global: `--imports <dir>`, `--exe <name>`, `--pid <pid>`, `--pause`.
+
+A target is either one of probe's labels (`zone`, `steelbones`, `gems`,
+`user_id`, `hash`, `instance_id`, `web_root`) or any path from the drop:
+
+```
+$ icrs read gems --bare
+13438
+$ icrs read game.gameInstances.Controller.userData.ModronHandler.modronSaves.InstanceID
+... 1
+$ icrs watch zone steelbones --interval 400
+    0.0s  zone=1 steelbones=7
 ```
 
 ### Offsets

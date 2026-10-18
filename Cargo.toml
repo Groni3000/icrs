@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
 
 # The real binary is always a Windows PE: on Linux it runs inside the game's
 # Proton container so it shares a wineserver with IdleDragons.exe, which is
@@ -14,6 +15,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Diagnostics_Debug",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Threading",
+    "Win32_System_Console",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
