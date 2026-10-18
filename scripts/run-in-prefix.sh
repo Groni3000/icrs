@@ -24,6 +24,13 @@ APPID="${ICRS_APPID:-627690}"   # 627690 = Idle Champions
 
 die() { echo "error: $*" >&2; exit 1; }
 
+# On Windows there is no container and no wineserver to join: the exe is native,
+# so run it and get out of the way. This branch is why cargo's runner can point
+# here on both hosts.
+case "${OSTYPE:-}${OS:-}" in
+  msys*|cygwin*|*Windows_NT) exec "$@" ;;
+esac
+
 case "${1:-}" in
   --appid) APPID="${2:?--appid needs a value}"; shift 2 ;;
 esac

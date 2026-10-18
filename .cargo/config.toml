@@ -4,8 +4,16 @@
 [build]
 target = "x86_64-pc-windows-gnu"
 
-# No `runner` here on purpose. A runner is configured per target, not per host,
-# so one set here would also fire on Windows - where the freshly built .exe
-# needs no help and cargo cannot execute a shell script (os error 193). Linux
-# needs the exe launched inside the game's Proton container, so there
-# `scripts/run.sh` injects the runner for the length of one cargo invocation.
+# `cargo run` and `cargo test` hand the freshly built .exe to this runner.
+#
+# A runner is configured per target, not per host, so this one line has to work
+# on both machines. Hence `bash <script>` rather than the script alone: cargo
+# would otherwise try to exec a .sh directly, which on Windows fails with
+# "%1 is not a valid Win32 application" (os error 193). Spelled this way, cargo
+# launches bash - Git Bash on Windows - and the script sends the exe into the
+# game's Proton container on Linux, or runs it as-is on Windows.
+#
+# The path is relative to the workspace root, which is what cargo resolves it
+# against, so it works from any directory.
+[target.x86_64-pc-windows-gnu]
+runner = ["bash", "scripts/run-in-prefix.sh"]

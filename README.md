@@ -5,50 +5,58 @@ Idle Champions AHK replacement for Briv gem farming.
 
 The game has to be open - the probe attaches to `IdleDragons.exe` and reads it.
 
-One command works on both hosts:
+Easiest, one launcher per host - both find an existing exe before building one,
+so they also work dropped next to a downloaded `icrs.exe`:
 
 ```
-./scripts/cargo.sh run --release            # probe
-./scripts/cargo.sh run --release -- info    # any subcommand after --
+icrs.bat                            # Windows: double-click, or
+icrs.bat watch zone gems --interval 500
+./icrs.sh                           # Linux (from a terminal), or
+./icrs.sh info
 ```
 
-On Linux it launches the exe inside the game's Proton container; on Windows it
-is a plain passthrough to cargo. What follows is what that does per host.
+`icrs.bat` pauses at the end so a double-clicked window stays readable; set
+`ICRS_NO_PAUSE=1` to skip that. `icrs.sh` does not pause - it is meant for a
+terminal, and sends the exe into the game's container for you.
+
+Or plain cargo, which works on both hosts:
+
+```
+cargo run --release                 # probe
+cargo run --release -- info         # any subcommand after --
+cargo test
+```
 
 ### Windows
 
 ```
 rustup target add x86_64-pc-windows-gnu     # once
-cargo run --release                         # works directly, no wrapper needed
 ```
+
+`cargo run` needs `bash` on PATH, because that is how the runner is spelled
+(see `.cargo/config.toml`); Git Bash provides it. Without bash, run the built
+exe directly - `target\x86_64-pc-windows-gnu\release\icrs.exe` - or build for
+MSVC instead with `--target x86_64-pc-windows-msvc`, which needs no runner.
 
 Double-clicking the exe runs `probe` and then waits for Enter, so the console
 window does not vanish.
 
-Or run the built exe straight: `target\x86_64-pc-windows-gnu\release\icrs.exe`.
-
 ### Linux (Steam Proton)
 
-The exe has to run inside the game's container to share its wineserver, so
-cargo needs a runner. `scripts/cargo.sh` sets one up for a single invocation:
+The exe has to run inside the game's container to share its wineserver, which
+is what `scripts/run-in-prefix.sh` does - cargo calls it for you. It needs the
+game started with the launcher service:
 
 ```
 # Steam -> the game -> Properties -> Launch Options, once:
 #     STEAM_COMPAT_LAUNCHER_SERVICE=proton %command%
-./scripts/cargo.sh run --release
-./scripts/cargo.sh run --release -- q
 ```
 
-Plain `cargo run` works on Windows but not on Linux, which is why the runner is
-not in `.cargo/config.toml`: cargo picks a runner per *target*, and this target
-is Windows on both hosts.
-
-The unit tests touch neither the game nor Wine, so they can run on the host
-with no container at all:
+The unit tests touch neither the game nor Wine, so with the game closed they
+can still run on the host:
 
 ```
-cargo test --lib --target x86_64-unknown-linux-gnu      # 27 tests, game closed
-./scripts/cargo.sh test                                 # everything, game open
+cargo test --lib --target x86_64-unknown-linux-gnu      # 27 tests, no game
 ```
 
 ## Commands
