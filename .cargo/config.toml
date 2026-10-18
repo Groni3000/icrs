@@ -1,0 +1,10 @@
+# The product is always a Windows PE (see Cargo.toml), so make that the default
+# target. Without this, cargo and rust-analyzer build for the host, every
+# #[cfg(windows)] block evaluates false, and the whole program greys out.
+[build]
+target = "x86_64-pc-windows-gnu"
+
+# Let `cargo run` work from Linux: cargo hands the freshly built .exe to this
+# runner, which launches it inside the game's Proton container.
+[target.x86_64-pc-windows-gnu]
+runner = "./scripts/run-in-prefix.sh"
