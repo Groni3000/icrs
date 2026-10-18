@@ -4,7 +4,8 @@
 [build]
 target = "x86_64-pc-windows-gnu"
 
-# Let `cargo run` work from Linux: cargo hands the freshly built .exe to this
-# runner, which launches it inside the game's Proton container.
-[target.x86_64-pc-windows-gnu]
-runner = "./scripts/run-in-prefix.sh"
+# No `runner` here on purpose. A runner is configured per target, not per host,
+# so one set here would also fire on Windows - where the freshly built .exe
+# needs no help and cargo cannot execute a shell script (os error 193). Linux
+# needs the exe launched inside the game's Proton container, so there
+# `scripts/run.sh` injects the runner for the length of one cargo invocation.
