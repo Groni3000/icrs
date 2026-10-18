@@ -208,6 +208,8 @@ impl Imports {
     pub fn resolve_at(&self, path: &str, indices: &[u64]) -> Result<Resolved, Error> {
         const LIST_ITEMS: u64 = 0x10;
         const LIST_ELEMENT_0: u64 = 0x20;
+        const DICT_ENTRIES: u64 = 0x18;
+        const DICT_FIRST_KEY: u64 = 0x28;
 
         let leaf = self
             .nodes
@@ -245,7 +247,21 @@ impl Imports {
                     offsets.push(Offset::Fixed(LIST_ITEMS));
                     offsets.push(Offset::Fixed(LIST_ELEMENT_0 + index * 8));
                 }
-                "Dict" | "HashSet" | "Stack" | "Queue" => {
+                // A dictionary is indexed by entry position, not by key: the
+                // game hashes its keys and we cannot reproduce that, so the
+                // caller walks the entries and compares what it finds - which
+                // is what Script Hub does too. The children in the import
+                // files hang off the entry's *value*, so that is what the
+                // chain lands on.
+                "Dict" => {
+                    let index = indices.next().unwrap_or(0);
+                    let entry = DictEntry::of(node);
+                    offsets.push(Offset::Fixed(DICT_ENTRIES));
+                    offsets.push(Offset::Fixed(
+                        DICT_FIRST_KEY + index * entry.stride + entry.value_offset,
+                    ));
+                }
+                "HashSet" | "Stack" | "Queue" | "SortedDict" => {
                     return Err(Error::Unsupported {
                         path: node_path.to_string(),
                         value_type: node.value_type.clone(),
@@ -286,6 +302,54 @@ impl Setter<'_> {
     fn set(self, value: String) {
         (self.apply)(self.node, value);
     }
+}
+
+/// Where a dictionary entry keeps its value, and how far apart entries are.
+///
+/// A Mono `Dictionary<K,V>` entry is `{int hashCode; int next; K key; V value}`
+/// inside an array whose header is `0x20` bytes, so entry 0's key sits at
+/// `0x28`. The size of the entry depends on the types: with two four-byte
+/// types everything packs into `0x10`, otherwise alignment pushes it to
+/// `0x18`, and a `Quad` value needs `0x20`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DictEntry {
+    pub stride: u64,
+    pub value_offset: u64,
+}
+
+impl DictEntry {
+    pub fn of(node: &Node) -> Self {
+        Self::new(node.collection_key_type.as_deref(), node.collection_val_type.as_deref())
+    }
+
+    pub fn new(key_type: Option<&str>, value_type: Option<&str>) -> Self {
+        let both_small = matches!(
+            (key_type.and_then(system_type_bytes), value_type.and_then(system_type_bytes)),
+            (Some(4), Some(4))
+        );
+        let item = if both_small { 4 } else { 8 };
+        let stride = if value_type == Some("Engine.Numeric.Quad") {
+            0x20
+        } else if item == 4 {
+            0x10
+        } else {
+            0x18
+        };
+        Self { stride, value_offset: item }
+    }
+}
+
+/// How many bytes a C# system type occupies inside a dictionary entry.
+/// Anything else is a reference - eight bytes on 64-bit.
+fn system_type_bytes(type_name: &str) -> Option<u64> {
+    Some(match type_name {
+        "System.Byte" | "System.UByte" | "System.Short" | "System.UShort" | "System.Int32"
+        | "System.UInt32" | "System.Enum" | "System.Single" | "System.USingle"
+        | "System.Boolean" => 4,
+        "System.Int64" | "System.UInt64" | "System.Double" | "System.String" => 8,
+        "Engine.Numeric.Quad" => 16,
+        _ => return None,
+    })
 }
 
 fn strip_comment(line: &str) -> &str {
@@ -511,15 +575,91 @@ this.game.bag.count:=New IBM_GOS(this.game.bag,"Int",[16])
         );
     }
 
+    /// A dict with no declared key/value types is assumed to hold references:
+    /// 24-byte entries, value eight bytes past the key.
     #[test]
-    fn unsupported_collections_say_so_instead_of_reading_garbage() {
+    fn untyped_dict_entries_assume_references() {
         let imports = imports();
-        match imports.resolve_at("game.bag.count", &[]) {
-            Err(Error::Unsupported { path, value_type }) => {
-                assert_eq!(path, "game.bag");
-                assert_eq!(value_type, "Dict");
-            }
-            other => panic!("expected Unsupported, got {other:?}"),
-        }
+        assert_eq!(
+            imports.resolve_at("game.bag.count", &[]).unwrap().fixed(0),
+            vec![224, 48, 0x18, 0x30, 16]
+        );
+    }
+}
+
+#[cfg(test)]
+mod dict_tests {
+    use super::*;
+
+    /// Two four-byte system types pack into a 16-byte entry; anything else
+    /// pads out to 24; a Quad value needs 32.
+    #[test]
+    fn entry_geometry_follows_the_types() {
+        assert_eq!(
+            DictEntry::new(Some("System.Int32"), Some("System.Single")),
+            DictEntry { stride: 0x10, value_offset: 4 }
+        );
+        assert_eq!(
+            DictEntry::new(Some("System.Int32"), Some("System.Collections.Generic.List<T>")),
+            DictEntry { stride: 0x18, value_offset: 8 }
+        );
+        assert_eq!(
+            DictEntry::new(Some("System.Int64"), Some("System.Int32")),
+            DictEntry { stride: 0x18, value_offset: 8 }
+        );
+        assert_eq!(
+            DictEntry::new(Some("System.Enum"), Some("Engine.Numeric.Quad")),
+            DictEntry { stride: 0x20, value_offset: 8 }
+        );
+    }
+
+    #[test]
+    fn splices_dict_entry_indexing() {
+        let mut imports = Imports::new();
+        imports
+            .load(
+                r#"
+this.bag:=New IBM_GOS(this.Root,"Dict",[64])
+this.bag._CollectionKeyType:="System.Int32"
+this.bag._CollectionValType:="System.Collections.Generic.List<Thing>"
+this.bag.List:=New IBM_GOS(this.bag,"List",[])
+this.bag.List.name:=New IBM_GOS(this.bag.List,"Int",[32])
+"#,
+            )
+            .unwrap();
+
+        // entry 0: entries array at 0x18, then key 0x28 + value offset 0x8.
+        // Then the value is a List, so _items 0x10 and element 0 at 0x20.
+        assert_eq!(
+            imports.resolve_at("bag.List.name", &[]).unwrap().fixed(0),
+            vec![64, 0x18, 0x30, 0x10, 0x20, 32]
+        );
+        // entry 2 is two strides further in.
+        assert_eq!(
+            imports.resolve_at("bag.List.name", &[2]).unwrap().fixed(0),
+            vec![64, 0x18, 0x30 + 2 * 0x18, 0x10, 0x20, 32]
+        );
+        // dict entry first, then the list element inside it.
+        assert_eq!(
+            imports.resolve_at("bag.List.name", &[1, 3]).unwrap().fixed(0),
+            vec![64, 0x18, 0x30 + 0x18, 0x10, 0x20 + 3 * 8, 32]
+        );
+    }
+
+    #[test]
+    fn collections_without_a_layout_are_still_refused() {
+        let mut imports = Imports::new();
+        imports
+            .load(
+                r#"
+this.set:=New IBM_GOS(this.Root,"HashSet",[16])
+this.set.item:=New IBM_GOS(this.set,"Int",[8])
+"#,
+            )
+            .unwrap();
+        assert!(matches!(
+            imports.resolve_at("set.item", &[]),
+            Err(Error::Unsupported { .. })
+        ));
     }
 }

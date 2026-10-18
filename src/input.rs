@@ -26,7 +26,27 @@ pub const Q: Key = Key { name: "q", vk: 0x51, scan: 16 };
 pub const W: Key = Key { name: "w", vk: 0x57, scan: 17 };
 pub const E: Key = Key { name: "e", vk: 0x45, scan: 18 };
 
-pub const KEYS: &[Key] = &[ESC, Q, W, E];
+/// The number row. The ultimates bar labels each slot with one of these - the
+/// `Hotkey` field on an `UltimatesBarItem` is that number - so this is how an
+/// ultimate gets fired.
+pub const D1: Key = Key { name: "1", vk: 0x31, scan: 2 };
+pub const D2: Key = Key { name: "2", vk: 0x32, scan: 3 };
+pub const D3: Key = Key { name: "3", vk: 0x33, scan: 4 };
+pub const D4: Key = Key { name: "4", vk: 0x34, scan: 5 };
+pub const D5: Key = Key { name: "5", vk: 0x35, scan: 6 };
+pub const D6: Key = Key { name: "6", vk: 0x36, scan: 7 };
+pub const D7: Key = Key { name: "7", vk: 0x37, scan: 8 };
+pub const D8: Key = Key { name: "8", vk: 0x38, scan: 9 };
+pub const D9: Key = Key { name: "9", vk: 0x39, scan: 10 };
+pub const D0: Key = Key { name: "0", vk: 0x30, scan: 11 };
+
+pub const KEYS: &[Key] =
+    &[ESC, Q, W, E, D1, D2, D3, D4, D5, D6, D7, D8, D9, D0];
+
+/// The key that fires the ultimate in a given bar slot, as the game labels it.
+pub fn hotkey(number: i64) -> Option<Key> {
+    KEYS.iter().copied().find(|key| key.name == number.to_string())
+}
 
 pub fn key_by_name(name: &str) -> Option<Key> {
     KEYS.iter().copied().find(|k| k.name.eq_ignore_ascii_case(name))

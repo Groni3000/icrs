@@ -88,6 +88,44 @@ pub enum Command {
         count: Option<u64>,
     },
 
+    /// List the ultimates bar: who is in it, which key fires it, cooldown
+    Ultimates,
+
+    /// Fire an ultimate, by champion id, champion name, or bar slot
+    Ult {
+        /// e.g. 83, "ellywick", or --slot 3
+        #[arg(required_unless_present = "slot")]
+        who: Option<String>,
+
+        /// Bar slot instead of a champion
+        #[arg(long, value_name = "N")]
+        slot: Option<u64>,
+
+        /// Fire even if the ultimate is still on cooldown
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Ellywick's hand from the Deck of Many Things
+    Cards {
+        /// Print only how many Gem cards are in hand
+        #[arg(long)]
+        gems: bool,
+
+        /// A different champion's deck-style handler, by id
+        #[arg(long, value_name = "ID")]
+        hero: Option<i64>,
+    },
+
+    /// List a champion's effect keys, with the dict entry each sits in
+    Effects {
+        /// Champion name or id
+        who: String,
+    },
+
+    /// List the value names `read` and `watch` understand (no game needed)
+    Labels,
+
     /// List the paths the loaded drop knows (no game needed)
     Paths {
         /// Only paths containing this text

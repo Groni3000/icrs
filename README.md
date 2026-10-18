@@ -68,7 +68,12 @@ icrs info                the loaded drop, its version vs the game's, each root's
 icrs read <target>       one value, by probe label or dotted path  (--bare, --index)
 icrs watch [targets...]  print repeatedly                          (--interval, --count)
 icrs paths [filter]      explore the loaded drop - no game needed  (--limit)
+icrs labels              the value names read/watch understand     - no game needed
 icrs key <keys...>       send keystrokes without focusing the game (--delay)
+icrs ultimates           the ultimates bar: champion, hotkey, cooldown
+icrs ult <who>           fire an ultimate by name, id or --slot    (--force)
+icrs cards               Ellywick's hand from the Deck of Many Things (--gems)
+icrs effects <who>       a champion's effect keys
 ```
 
 Global: `--imports <dir>`, `--exe <name>`, `--pid <pid>`, `--pause`.
@@ -83,6 +88,24 @@ $ icrs read game.gameInstances.Controller.userData.ModronHandler.modronSaves.Ins
 ... 1
 $ icrs watch zone steelbones --interval 400
     0.0s  zone=1 steelbones=7
+```
+
+Champions, their ultimates and their effect handlers:
+
+```
+$ icrs ultimates
+slot  key  champion                     cooldown
+   3    4  Briv (#58)                   ready
+   7    8  Ellywick (#83)               ready
+$ icrs ult ellywick
+fired slot 7 (champion #83) with key 8
+$ icrs cards
+hand        Gem, Moon, Knight, Flames, Gem
+gem cards   2
+$ icrs cards --gems
+2
+$ icrs effects briv | grep haste
+ 10  briv_unnatural_haste
 ```
 
 ### Offsets

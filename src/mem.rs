@@ -100,6 +100,17 @@ impl Process {
         Ok(i64::from_le_bytes(buf))
     }
 
+    /// Read the game's 16-byte `Quad`: mantissa, then binary exponent.
+    ///
+    /// The value is `(mantissa + 2^63) * 2^exponent`. The bias makes the
+    /// mantissa unsigned in effect, which is how Script Hub reads it too.
+    pub fn read_quad(&self, address: u64) -> io::Result<Quad> {
+        Ok(Quad {
+            mantissa: self.read_i64(address)?,
+            exponent: self.read_i64(address + 8)?,
+        })
+    }
+
     /// Read a Mono string through the pointer stored at `address`.
     ///
     /// Layout: the object header is `0x10` bytes, then a 4-byte length (in
@@ -224,6 +235,39 @@ impl Process {
             addr = hops.last().unwrap().value.unwrap() + offset;
         }
         hops
+    }
+}
+
+/// The game's big-number type, kept symbolic because the value it represents
+/// routinely exceeds `f64`'s range at deep zones.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Quad {
+    pub mantissa: i64,
+    pub exponent: i64,
+}
+
+impl Quad {
+    /// Base-10 logarithm of the value, which stays finite however large it is.
+    pub fn log10(&self) -> f64 {
+        const BIAS: f64 = 9_223_372_036_854_775_808.0; // 2^63
+        (self.mantissa as f64 + BIAS).log10() + self.exponent as f64 * std::f64::consts::LN_2 / std::f64::consts::LN_10
+    }
+}
+
+impl std::fmt::Display for Quad {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let decimated = self.log10();
+        if !decimated.is_finite() {
+            return write!(f, "{}*2^{}", self.mantissa, self.exponent);
+        }
+        if decimated <= 4.0 {
+            const BIAS: f64 = 9_223_372_036_854_775_808.0;
+            let value = (self.mantissa as f64 + BIAS) * 2f64.powf(self.exponent as f64);
+            return write!(f, "{value:.2}");
+        }
+        let exponent = decimated.floor();
+        let significand = 10f64.powf(decimated - exponent);
+        write!(f, "{significand:.2}e{exponent:.0}")
     }
 }
 

@@ -274,6 +274,12 @@ impl Catalog {
     /// Turn a dotted path into a chain, indexing collections with `indices`
     /// (outermost first, 0 where omitted).
     pub fn chain(&self, label: &str, path: &str, indices: &[u64]) -> Result<Chain, Error> {
+        if let Some(parent) = path.strip_suffix(".size") {
+            if self.imports.get(path).is_none() {
+                return self.collection_size(label, parent, indices);
+            }
+        }
+
         let resolved = self
             .imports
             .resolve_at(path, indices)
@@ -295,6 +301,41 @@ impl Catalog {
             root: root.clone(),
             offsets,
             kind,
+        })
+    }
+
+    /// `<collection>.size`: how many elements it holds.
+    ///
+    /// The import files never declare this - it is Mono's own layout, `_size`
+    /// at `0x18` for a `List<T>` and `count` at `0x40` for a
+    /// `Dictionary<K,V>` - but Script Hub spells it `.size` and so do we,
+    /// because every loop over a collection needs it.
+    fn collection_size(&self, label: &str, parent: &str, indices: &[u64]) -> Result<Chain, Error> {
+        let resolved = self
+            .imports
+            .resolve_at(parent, indices)
+            .map_err(|err| Error::UnknownPath { path: parent.to_string(), err })?;
+        let size_offset = match resolved.value_type.as_str() {
+            "List" => 0x18,
+            "Dict" => 0x40,
+            other => {
+                return Err(Error::UnreadableType {
+                    path: parent.to_string(),
+                    value_type: format!("{other} - .size is defined for List and Dict"),
+                });
+            }
+        };
+
+        let root = self.root_for(&resolved.root)?;
+        let mut offsets = root.module_offset.clone();
+        offsets.extend(resolved.fixed(root.static_offset));
+        offsets.push(size_offset);
+        Ok(Chain {
+            label: label.to_string(),
+            path: format!("{parent}.size"),
+            root: root.clone(),
+            offsets,
+            kind: Kind::I32,
         })
     }
 
@@ -373,7 +414,7 @@ mod tests {
     #[test]
     fn builds_the_verified_chains_from_data_alone() {
         let catalog = Catalog::embedded().unwrap();
-        for want in crate::offsets::WANTED {
+        for want in crate::offsets::NAMED {
             catalog
                 .chain(want.label, want.path, want.indices)
                 .unwrap_or_else(|err| panic!("{}: {err}", want.label));

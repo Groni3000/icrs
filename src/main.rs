@@ -53,6 +53,136 @@ fn run(cli: &Cli) -> io::Result<()> {
             Ok(())
         }
 
+        Command::Cards { gems, hero } => {
+            let session = Session::attach(cli, &catalog)?;
+            let hero_id = hero.unwrap_or(offsets::effects::ELLYWICK_HERO_ID);
+            let hero_index = session.hero_index(&catalog, hero_id)?;
+            let entry = session.find_effect(&catalog, hero_index, offsets::effects::DECK_KEYS)?;
+            let hand = session.cards(&catalog, hero_index, entry)?;
+            let gem_count =
+                hand.iter().filter(|card| **card == offsets::effects::GEM_CARD).count();
+
+            if *gems {
+                println!("{gem_count}");
+                return Ok(());
+            }
+            let named: Vec<&str> =
+                hand.iter().map(|card| offsets::effects::card_name(*card)).collect();
+            println!("champion #{hero_id}, effect entry {entry}");
+            println!("hand        {}", named.join(", "));
+            println!("gem cards   {gem_count}");
+            Ok(())
+        }
+
+        Command::Effects { who } => {
+            let session = Session::attach(cli, &catalog)?;
+            let hero_id = session.hero_id(&catalog, who)?;
+            let hero_index = session.hero_index(&catalog, hero_id)?;
+            for (entry, key) in session.effect_keys(&catalog, hero_index)? {
+                println!("{entry:>3}  {key}");
+            }
+            Ok(())
+        }
+
+        Command::Labels => {
+            for want in offsets::NAMED {
+                let mark = if want.probe { "*" } else { " " };
+                println!("{mark} {:<14} {}", want.label, want.path);
+            }
+            for derived in offsets::DERIVED {
+                println!(
+                    "  {:<14} {} / {} ({})",
+                    derived.label, derived.from, derived.divide, derived.why
+                );
+            }
+            println!("\n* = included in `probe`");
+            Ok(())
+        }
+
+        Command::Ultimates => {
+            let session = Session::attach(cli, &catalog)?;
+            let bar = session.ultimates(&catalog)?;
+            let roster = session.roster(&catalog).unwrap_or_default();
+            println!("slot  key  champion                     cooldown");
+            for entry in &bar {
+                let name = roster
+                    .iter()
+                    .find(|(id, _)| *id == entry.hero_id)
+                    .map(|(_, name)| name.clone())
+                    .unwrap_or_else(|| format!("#{}", entry.hero_id));
+                let state = if entry.queued {
+                    "queued".to_string()
+                } else if entry.ready() {
+                    "ready".to_string()
+                } else {
+                    format!("{:.0}s", entry.cooldown)
+                };
+                println!(
+                    "{:>4}  {:>3}  {:<28} {state}",
+                    entry.slot,
+                    entry.hotkey,
+                    format!("{name} (#{})", entry.hero_id)
+                );
+            }
+            Ok(())
+        }
+
+        Command::Ult { who, slot, force } => {
+            let session = Session::attach(cli, &catalog)?;
+            let bar = session.ultimates(&catalog)?;
+
+            let entry = match (who, slot) {
+                (_, Some(slot)) => bar.iter().find(|entry| entry.slot == *slot).ok_or_else(|| {
+                    io::Error::other(format!("no ultimate in slot {slot}"))
+                })?,
+                (Some(who), None) => {
+                    let hero_id = match who.parse::<i64>() {
+                        Ok(id) => id,
+                        Err(_) => {
+                            let roster = session.roster(&catalog)?;
+                            let wanted = who.to_lowercase();
+                            roster
+                                .iter()
+                                .find(|(_, name)| name.to_lowercase() == wanted)
+                                .or_else(|| {
+                                    roster
+                                        .iter()
+                                        .find(|(_, name)| name.to_lowercase().contains(&wanted))
+                                })
+                                .map(|(id, _)| *id)
+                                .ok_or_else(|| {
+                                    io::Error::other(format!("no champion matching {who:?}"))
+                                })?
+                        }
+                    };
+                    bar.iter().find(|entry| entry.hero_id == hero_id).ok_or_else(|| {
+                        io::Error::other(format!(
+                            "champion {hero_id} has no ultimate in the bar - is it in the formation?"
+                        ))
+                    })?
+                }
+                (None, None) => unreachable!("clap requires one of them"),
+            };
+
+            if !entry.ready() && !force {
+                return Err(io::Error::other(format!(
+                    "slot {} is on cooldown for {:.0}s (--force to send anyway)",
+                    entry.slot, entry.cooldown
+                )));
+            }
+            let key = input::hotkey(entry.hotkey).ok_or_else(|| {
+                io::Error::other(format!("slot {} has hotkey {}, which is not a key this \
+                     program knows how to send", entry.slot, entry.hotkey))
+            })?;
+            session.window.nudge_active()?;
+            session.window.tap(key)?;
+            println!(
+                "fired slot {} (champion #{}) with key {}",
+                entry.slot, entry.hero_id, key.name
+            );
+            Ok(())
+        }
+
         Command::Key { keys, delay } => {
             let pid = find_pid(cli)?;
             let window = input::Window::for_process(pid)?;
@@ -98,7 +228,7 @@ fn run(cli: &Cli) -> io::Result<()> {
 
             let mut traced: Vec<String> = Vec::new();
             let mut current_root = String::new();
-            for want in offsets::WANTED {
+            for want in offsets::NAMED.iter().filter(|want| want.probe) {
                 let target = Target::from(want);
                 let chain = match catalog.chain(&target.label, &target.path, &target.indices) {
                     Ok(chain) => chain,
@@ -126,7 +256,7 @@ fn run(cli: &Cli) -> io::Result<()> {
             let chain = catalog
                 .chain(&target.label, &target.path, &target.indices)
                 .map_err(|err| io::Error::other(err.to_string()))?;
-            let value = session.read(&chain)?;
+            let value = target.finish(session.read(&chain)?);
             if *bare {
                 println!("{value}");
             } else {
@@ -159,7 +289,7 @@ fn run(cli: &Cli) -> io::Result<()> {
                 for (target, chain) in &chains {
                     let shown = match chain {
                         Ok(chain) => match session.read(chain) {
-                            Ok(value) => value.to_string(),
+                            Ok(value) => target.finish(value).to_string(),
                             Err(_) => "ERR".to_string(),
                         },
                         Err(_) => "NO CHAIN".to_string(),
@@ -243,6 +373,7 @@ impl Session {
             Kind::I32 => self.game.read_i32(address).map(|v| Value::Int(v as i64)),
             Kind::I64 => self.game.read_i64(address).map(Value::Int),
             Kind::U8 => self.game.read_u8(address).map(|v| Value::Int(v as i64)),
+            Kind::Quad => self.game.read_quad(address).map(Value::Big),
             Kind::F32 => self.game.read_f32(address).map(|v| Value::Float(v as f64)),
             Kind::F64 => self.game.read_f64(address).map(Value::Float),
             Kind::Utf16 => self.game.read_mono_string(address).map(Value::Text),
@@ -253,7 +384,7 @@ impl Session {
     /// walk died on. A stale root breaks every chain hanging off it, so each
     /// root is traced only once.
     fn report(&self, target: &Target, chain: &Chain, traced: &mut Vec<String>) {
-        match self.read(chain) {
+        match self.read(chain).map(|value| target.finish(value)) {
             Ok(value) => {
                 let warning = match (&value, target.sane) {
                     (Value::Int(read), Some((low, high))) if !(low..=high).contains(read) => {
@@ -294,6 +425,18 @@ struct Target {
     path: String,
     indices: Vec<u64>,
     sane: Option<(i64, i64)>,
+    /// Derived values divide what was read - see `offsets::DERIVED`.
+    divide: i64,
+}
+
+impl Target {
+    /// Apply whatever the label implies on top of the raw read.
+    fn finish(&self, value: Value) -> Value {
+        match value {
+            Value::Int(raw) if self.divide > 1 => Value::Int(raw.div_euclid(self.divide)),
+            other => other,
+        }
+    }
 }
 
 impl Target {
@@ -303,12 +446,22 @@ impl Target {
             path: want.path.to_string(),
             indices: want.indices.to_vec(),
             sane: want.sane,
+            divide: 1,
         }
     }
 
-    /// A name is a probe label if one matches, otherwise it is a path.
+    /// A name is a derived value, then a probe label, then a raw path.
     fn parse(name: &str, indices: &[u64]) -> Self {
-        match offsets::WANTED.iter().find(|want| want.label == name) {
+        if let Some(derived) = offsets::DERIVED.iter().find(|derived| derived.label == name) {
+            if let Some(want) = offsets::NAMED.iter().find(|want| want.label == derived.from) {
+                let mut target = Target::from(want);
+                target.label = derived.label.to_string();
+                target.divide = derived.divide;
+                target.sane = None;
+                return target;
+            }
+        }
+        match offsets::NAMED.iter().find(|want| want.label == name) {
             Some(want) => {
                 let mut target = Target::from(want);
                 if !indices.is_empty() {
@@ -321,13 +474,14 @@ impl Target {
                 path: name.to_string(),
                 indices: indices.to_vec(),
                 sane: None,
+                divide: 1,
             },
         }
     }
 
     fn list(names: &[String]) -> Vec<Self> {
         if names.is_empty() {
-            return offsets::WANTED.iter().map(Target::from).collect();
+            return offsets::NAMED.iter().map(Target::from).collect();
         }
         names.iter().map(|name| Target::parse(name, &[])).collect()
     }
@@ -336,6 +490,7 @@ impl Target {
 enum Value {
     Int(i64),
     Float(f64),
+    Big(icrs::mem::Quad),
     Text(String),
 }
 
@@ -344,6 +499,7 @@ impl std::fmt::Display for Value {
         match self {
             Value::Int(value) => write!(f, "{value}"),
             Value::Float(value) => write!(f, "{value}"),
+            Value::Big(value) => write!(f, "{value}"),
             Value::Text(value) => write!(f, "{value:?}"),
         }
     }
@@ -405,4 +561,170 @@ fn wait_for_enter() {
     let _ = io::stdout().flush();
     let mut discard = String::new();
     let _ = io::stdin().read_line(&mut discard);
+}
+
+/// One entry in the ultimates bar.
+struct Ultimate {
+    slot: u64,
+    hero_id: i64,
+    hotkey: i64,
+    cooldown: f64,
+    queued: bool,
+}
+
+impl Ultimate {
+    fn ready(&self) -> bool {
+        self.cooldown <= 0.0
+    }
+}
+
+impl Session {
+    /// Read the ultimates bar. Slots exist for champions without ultimates
+    /// too, so entries that do not resolve are skipped rather than reported.
+    fn ultimates(&self, catalog: &Catalog) -> io::Result<Vec<Ultimate>> {
+        let size = self.read_named(catalog, offsets::ultimates::SIZE, &[])?;
+        let size = match size {
+            Value::Int(size) if (0..=64).contains(&size) => size as u64,
+            other => return Err(io::Error::other(format!("implausible bar size: {other}"))),
+        };
+
+        let mut bar = Vec::new();
+        for slot in 0..size {
+            let at = [0, slot];
+            let (Ok(Value::Int(hero_id)), Ok(Value::Int(hotkey))) = (
+                self.read_named(catalog, offsets::ultimates::HERO_ID, &at),
+                self.read_named(catalog, offsets::ultimates::HOTKEY, &at),
+            ) else {
+                continue;
+            };
+            let cooldown = match self.read_named(catalog, offsets::ultimates::COOLDOWN, &at) {
+                Ok(Value::Float(seconds)) => seconds,
+                _ => continue,
+            };
+            let queued = matches!(
+                self.read_named(catalog, offsets::ultimates::QUEUED, &at),
+                Ok(Value::Int(1))
+            );
+            bar.push(Ultimate { slot, hero_id, hotkey, cooldown, queued });
+        }
+        Ok(bar)
+    }
+
+    /// Champion ids and names, for turning "ellywick" into 83.
+    fn roster(&self, catalog: &Catalog) -> io::Result<Vec<(i64, String)>> {
+        let Value::Int(size) = self.read_named(catalog, offsets::heroes::SIZE, &[])? else {
+            return Err(io::Error::other("hero list size is not a number"));
+        };
+
+        let mut roster = Vec::new();
+        for index in 0..size.clamp(0, 1024) as u64 {
+            let at = [0, index];
+            if let (Ok(Value::Int(id)), Ok(Value::Text(name))) = (
+                self.read_named(catalog, offsets::heroes::ID, &at),
+                self.read_named(catalog, offsets::heroes::NAME, &at),
+            ) {
+                roster.push((id, name));
+            }
+        }
+        Ok(roster)
+    }
+
+    /// Where a champion sits in the hero list, which is what every
+    /// per-champion path is indexed by.
+    fn hero_index(&self, catalog: &Catalog, hero_id: i64) -> io::Result<u64> {
+        let Value::Int(size) = self.read_named(catalog, offsets::heroes::SIZE, &[])? else {
+            return Err(io::Error::other("hero list size is not a number"));
+        };
+        for index in 0..size.clamp(0, 1024) as u64 {
+            if let Ok(Value::Int(id)) =
+                self.read_named(catalog, offsets::heroes::ID, &[0, index])
+                && id == hero_id
+            {
+                return Ok(index);
+            }
+        }
+        Err(io::Error::other(format!("no champion with id {hero_id} in the hero list")))
+    }
+
+    /// Accepts a champion id or a name.
+    fn hero_id(&self, catalog: &Catalog, who: &str) -> io::Result<i64> {
+        if let Ok(id) = who.parse::<i64>() {
+            return Ok(id);
+        }
+        let wanted = who.to_lowercase();
+        let roster = self.roster(catalog)?;
+        roster
+            .iter()
+            .find(|(_, name)| name.to_lowercase() == wanted)
+            .or_else(|| roster.iter().find(|(_, name)| name.to_lowercase().contains(&wanted)))
+            .map(|(id, _)| *id)
+            .ok_or_else(|| io::Error::other(format!("no champion matching {who:?}")))
+    }
+
+    /// Every effect key on a champion, with the dictionary entry it occupies.
+    fn effect_keys(&self, catalog: &Catalog, hero: u64) -> io::Result<Vec<(u64, String)>> {
+        let Value::Int(count) = self.read_named(catalog, offsets::effects::COUNT, &[0, hero])?
+        else {
+            return Err(io::Error::other("effect key count is not a number"));
+        };
+
+        let mut keys = Vec::new();
+        for entry in 0..count.clamp(0, 256) as u64 {
+            if let Ok(Value::Text(key)) =
+                self.read_named(catalog, offsets::effects::KEY, &[0, hero, entry, 0])
+                && !key.is_empty()
+            {
+                keys.push((entry, key));
+            }
+        }
+        Ok(keys)
+    }
+
+    /// The dictionary entry holding one of `candidates`, in preference order.
+    fn find_effect(
+        &self,
+        catalog: &Catalog,
+        hero: u64,
+        candidates: &[&str],
+    ) -> io::Result<u64> {
+        let keys = self.effect_keys(catalog, hero)?;
+        for wanted in candidates {
+            if let Some((entry, _)) = keys.iter().find(|(_, key)| key == wanted) {
+                return Ok(*entry);
+            }
+        }
+        Err(io::Error::other(format!(
+            "none of {candidates:?} among this champion's effect keys ({})",
+            keys.iter().map(|(_, key)| key.as_str()).collect::<Vec<_>>().join(", ")
+        )))
+    }
+
+    /// The card types in hand, in order.
+    fn cards(&self, catalog: &Catalog, hero: u64, entry: u64) -> io::Result<Vec<i64>> {
+        let at = [0, hero, entry, 0, 0];
+        let Value::Int(size) = self.read_named(catalog, offsets::effects::CARDS, &at)? else {
+            return Err(io::Error::other("card count is not a number"));
+        };
+        if !(0..=16).contains(&size) {
+            return Err(io::Error::other(format!("implausible card count: {size}")));
+        }
+
+        let mut hand = Vec::new();
+        for card in 0..size as u64 {
+            let at = [0, hero, entry, 0, 0, card];
+            if let Value::Int(card_type) =
+                self.read_named(catalog, offsets::effects::CARD_TYPE, &at)?
+            {
+                hand.push(card_type);
+            }
+        }
+        Ok(hand)
+    }
+
+    fn read_named(&self, catalog: &Catalog, path: &str, indices: &[u64]) -> io::Result<Value> {
+        let chain = catalog
+            .chain(path, path, indices)
+            .map_err(|err| io::Error::other(err.to_string()))?;
+        self.read(&chain)
+    }
 }
