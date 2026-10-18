@@ -1,9 +1,12 @@
 pub mod catalog;
 pub mod cli;
+pub mod game;
 pub mod imports;
 pub mod input;
 pub mod json;
 pub mod mem;
 pub mod offsets;
 pub mod process;
+pub mod snapshot;
+pub mod value;
 pub mod version;

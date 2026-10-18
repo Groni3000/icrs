@@ -1,14 +1,16 @@
 //! `icrs` - read a running Idle Champions client, and send input to it.
 //!
-//! Every offset comes from the loaded drop (see `icrs::catalog`); this file
-//! only decides what to read and how to print it.
+//! Every offset comes from the loaded drop (see `icrs::catalog`) and every read
+//! goes through `icrs::game`; this file only decides what to ask for and how to
+//! print it.
 
 use clap::Parser;
 
 use icrs::catalog::{Catalog, Chain};
 use icrs::cli::{Cli, Command};
-use icrs::mem::Process;
-use icrs::offsets::Kind;
+use icrs::game::Game;
+use icrs::snapshot::{Sampler, Snapshot};
+use icrs::value::Value;
 use icrs::{input, offsets, process, version};
 
 use std::io::{self, IsTerminal, Write};
@@ -53,12 +55,27 @@ fn run(cli: &Cli) -> io::Result<()> {
             Ok(())
         }
 
+        Command::Labels => {
+            for want in offsets::NAMED {
+                let mark = if want.probe { "*" } else { " " };
+                println!("{mark} {:<14} {}", want.label, want.path);
+            }
+            for derived in offsets::DERIVED {
+                println!(
+                    "  {:<14} {} / {} ({})",
+                    derived.label, derived.from, derived.divide, derived.why
+                );
+            }
+            println!("\n* = included in `probe`");
+            Ok(())
+        }
+
         Command::Cards { count, gems, hero } => {
-            let session = Session::attach(cli, &catalog)?;
+            let game = attach(cli, catalog)?;
             let hero_id = hero.unwrap_or(offsets::effects::ELLYWICK_HERO_ID);
-            let hero_index = session.hero_index(&catalog, hero_id)?;
-            let entry = session.find_effect(&catalog, hero_index, offsets::effects::DECK_KEYS)?;
-            let hand = session.cards(&catalog, hero_index, entry)?;
+            let hero_index = game.hero_index(hero_id)?;
+            let entry = game.find_effect(hero_index, offsets::effects::DECK_KEYS)?;
+            let hand = game.cards(hero_index, entry)?;
             let tally = |card_type: i64| hand.iter().filter(|card| **card == card_type).count();
 
             // Scriptable single number: --count <type>, or --gems for the one
@@ -95,86 +112,43 @@ fn run(cli: &Cli) -> io::Result<()> {
         }
 
         Command::Effects { who } => {
-            let session = Session::attach(cli, &catalog)?;
-            let hero_id = session.hero_id(&catalog, who)?;
-            let hero_index = session.hero_index(&catalog, hero_id)?;
-            for (entry, key) in session.effect_keys(&catalog, hero_index)? {
+            let game = attach(cli, catalog)?;
+            let hero_id = game.hero_id(who)?;
+            let hero_index = game.hero_index(hero_id)?;
+            for (entry, key) in game.effect_keys(hero_index)? {
                 println!("{entry:>3}  {key}");
             }
             Ok(())
         }
 
-        Command::Labels => {
-            for want in offsets::NAMED {
-                let mark = if want.probe { "*" } else { " " };
-                println!("{mark} {:<14} {}", want.label, want.path);
-            }
-            for derived in offsets::DERIVED {
-                println!(
-                    "  {:<14} {} / {} ({})",
-                    derived.label, derived.from, derived.divide, derived.why
-                );
-            }
-            println!("\n* = included in `probe`");
-            Ok(())
-        }
-
         Command::Ultimates => {
-            let session = Session::attach(cli, &catalog)?;
-            let bar = session.ultimates(&catalog)?;
-            let roster = session.roster(&catalog).unwrap_or_default();
+            let game = attach(cli, catalog)?;
+            let bar = game.ultimates()?;
+            let roster = game.roster().unwrap_or_default();
             println!("slot  key  champion                     cooldown");
             for entry in &bar {
-                let name = roster
-                    .iter()
-                    .find(|(id, _)| *id == entry.hero_id)
-                    .map(|(_, name)| name.clone())
-                    .unwrap_or_else(|| format!("#{}", entry.hero_id));
-                let state = if entry.queued {
-                    "queued".to_string()
-                } else if entry.ready() {
-                    "ready".to_string()
-                } else {
-                    format!("{:.0}s", entry.cooldown)
-                };
                 println!(
-                    "{:>4}  {:>3}  {:<28} {state}",
+                    "{:>4}  {:>3}  {:<28} {}",
                     entry.slot,
                     entry.hotkey,
-                    format!("{name} (#{})", entry.hero_id)
+                    format!("{} (#{})", champion(&roster, entry.hero_id), entry.hero_id),
+                    state_of(entry)
                 );
             }
             Ok(())
         }
 
         Command::Ult { who, slot, force } => {
-            let session = Session::attach(cli, &catalog)?;
-            let bar = session.ultimates(&catalog)?;
+            let game = attach(cli, catalog)?;
+            let bar = game.ultimates()?;
 
             let entry = match (who, slot) {
-                (_, Some(slot)) => bar.iter().find(|entry| entry.slot == *slot).ok_or_else(|| {
-                    io::Error::other(format!("no ultimate in slot {slot}"))
-                })?,
+                (_, Some(slot)) => bar
+                    .iter()
+                    .find(|entry| entry.slot == *slot)
+                    .ok_or_else(|| io::Error::other(format!("no ultimate in slot {slot}")))?,
                 (Some(who), None) => {
-                    let hero_id = match who.parse::<i64>() {
-                        Ok(id) => id,
-                        Err(_) => {
-                            let roster = session.roster(&catalog)?;
-                            let wanted = who.to_lowercase();
-                            roster
-                                .iter()
-                                .find(|(_, name)| name.to_lowercase() == wanted)
-                                .or_else(|| {
-                                    roster
-                                        .iter()
-                                        .find(|(_, name)| name.to_lowercase().contains(&wanted))
-                                })
-                                .map(|(id, _)| *id)
-                                .ok_or_else(|| {
-                                    io::Error::other(format!("no champion matching {who:?}"))
-                                })?
-                        }
-                    };
+                    let hero_id = game.hero_id(who)?;
                     bar.iter().find(|entry| entry.hero_id == hero_id).ok_or_else(|| {
                         io::Error::other(format!(
                             "champion {hero_id} has no ultimate in the bar - is it in the formation?"
@@ -191,11 +165,12 @@ fn run(cli: &Cli) -> io::Result<()> {
                 )));
             }
             let key = input::hotkey(entry.hotkey).ok_or_else(|| {
-                io::Error::other(format!("slot {} has hotkey {}, which is not a key this \
-                     program knows how to send", entry.slot, entry.hotkey))
+                io::Error::other(format!(
+                    "slot {} has hotkey {}, which is not a key this program knows how to send",
+                    entry.slot, entry.hotkey
+                ))
             })?;
-            session.window.nudge_active()?;
-            session.window.tap(key)?;
+            game.tap(key)?;
             println!(
                 "fired slot {} (champion #{}) with key {}",
                 entry.slot, entry.hero_id, key.name
@@ -219,38 +194,44 @@ fn run(cli: &Cli) -> io::Result<()> {
         }
 
         Command::Info => {
-            let session = Session::attach(cli, &catalog)?;
-            session.print_header(&catalog);
+            let game = attach(cli, catalog)?;
+            print_header(&game);
             println!("\nroots");
-            for root in catalog.roots() {
-                let base = session.module + root.module_address;
+            for root in game.catalog().roots() {
+                let base = game.module() + root.module_address;
                 // Resolving is not enough: the last hop is never dereferenced,
                 // so a stale path can "succeed" onto an address that holds
                 // nothing. A real Mono object starts with a vtable pointer, so
                 // read that as proof of life.
-                let state = match session.game.resolve(base, &root.module_offset) {
-                    Ok(addr) => match session.game.read_u64(addr) {
+                let state = match game.process().resolve(base, &root.module_offset) {
+                    Ok(addr) => match game.process().read_u64(addr) {
                         Ok(vtable) if vtable != 0 => format!("live -> {addr:#x}"),
                         Ok(_) => format!("SUSPECT -> {addr:#x} begins with a null pointer"),
                         Err(err) => format!("DEAD -> {addr:#x} is not readable: {err}"),
                     },
                     Err(err) => format!("DEAD: {err}"),
                 };
-                println!("  {:<16} mono+{:#x} -> {}", root.name, root.module_address, hops(&root.module_offset));
+                println!(
+                    "  {:<16} mono+{:#x} -> {}",
+                    root.name,
+                    root.module_address,
+                    hops(&root.module_offset)
+                );
                 println!("  {:<16} {state}", "");
             }
             Ok(())
         }
 
         Command::Probe => {
-            let session = Session::attach(cli, &catalog)?;
-            session.print_header(&catalog);
+            let game = attach(cli, catalog)?;
+            print_header(&game);
 
             let mut traced: Vec<String> = Vec::new();
             let mut current_root = String::new();
             for want in offsets::NAMED.iter().filter(|want| want.probe) {
                 let target = Target::from(want);
-                let chain = match catalog.chain(&target.label, &target.path, &target.indices) {
+                let chain = match game.catalog().chain(&target.label, &target.path, &target.indices)
+                {
                     Ok(chain) => chain,
                     Err(err) => {
                         println!("  {:<12} NO CHAIN: {err}", target.label);
@@ -265,18 +246,19 @@ fn run(cli: &Cli) -> io::Result<()> {
                         hops(&chain.root.module_offset)
                     );
                 }
-                session.report(&target, &chain, &mut traced);
+                report(&game, &target, &chain, &mut traced);
             }
             Ok(())
         }
 
         Command::Read { target, index, bare } => {
-            let session = Session::attach(cli, &catalog)?;
+            let game = attach(cli, catalog)?;
             let target = Target::parse(target, index);
-            let chain = catalog
+            let chain = game
+                .catalog()
                 .chain(&target.label, &target.path, &target.indices)
                 .map_err(|err| io::Error::other(err.to_string()))?;
-            let value = target.finish(session.read(&chain)?);
+            let value = target.finish(game.read(&chain)?);
             if *bare {
                 println!("{value}");
             } else {
@@ -286,29 +268,27 @@ fn run(cli: &Cli) -> io::Result<()> {
         }
 
         Command::Watch { targets, interval, count } => {
-            let session = Session::attach(cli, &catalog)?;
+            let game = attach(cli, catalog)?;
             let targets = Target::list(targets);
             let chains: Vec<(Target, io::Result<Chain>)> = targets
                 .into_iter()
                 .map(|target| {
-                    let chain = catalog
+                    let chain = game
+                        .catalog()
                         .chain(&target.label, &target.path, &target.indices)
                         .map_err(|err| io::Error::other(err.to_string()));
                     (target, chain)
                 })
                 .collect();
 
-            println!(
-                "watching {} value(s) every {interval}ms - Ctrl-C to stop",
-                chains.len()
-            );
+            println!("watching {} value(s) every {interval}ms - Ctrl-C to stop", chains.len());
             let start = Instant::now();
             let mut reads = 0u64;
             loop {
                 let mut line = format!("{:>7.1}s ", start.elapsed().as_secs_f64());
                 for (target, chain) in &chains {
                     let shown = match chain {
-                        Ok(chain) => match session.read(chain) {
+                        Ok(chain) => match game.read(chain) {
                             Ok(value) => target.finish(value).to_string(),
                             Err(_) => "ERR".to_string(),
                         },
@@ -326,116 +306,26 @@ fn run(cli: &Cli) -> io::Result<()> {
                 std::thread::sleep(Duration::from_millis(*interval));
             }
         }
+
+        Command::Snapshot { json } => {
+            let game = attach(cli, catalog)?;
+            let sampler = Sampler::new(&game)?;
+            let snapshot = sampler.take(&game);
+            if *json {
+                println!("{}", snapshot.to_json());
+                return Ok(());
+            }
+            for note in &sampler.notes {
+                println!("note        {note}");
+            }
+            show(&game, &snapshot);
+            Ok(())
+        }
     }
 }
 
-/// An attached game: the process, its module base, and what we know about it.
-struct Session {
-    pid: u32,
-    exe: std::path::PathBuf,
-    game_version: io::Result<String>,
-    game: Process,
-    module: u64,
-    window: input::Window,
-}
-
-impl Session {
-    fn attach(cli: &Cli, _catalog: &Catalog) -> io::Result<Self> {
-        let pid = find_pid(cli)?;
-        let exe = process::exe_path(pid)?;
-        let game_version = version::installed(&exe);
-        let game = Process::open(pid)?;
-        let module = game.module_base(offsets::MONO_MODULE)?;
-        let window = input::Window::for_process(pid)?;
-        Ok(Self { pid, exe, game_version, game, module, window })
-    }
-
-    fn print_header(&self, catalog: &Catalog) {
-        println!("pid         {}", self.pid);
-        println!("exe         {}", self.exe.display());
-        match &self.game_version {
-            Ok(found) => println!("game        {found}"),
-            Err(err) => println!("game        version unknown: {err}"),
-        }
-        println!("{:<11} {:#x}", offsets::MONO_MODULE, self.module);
-
-        let describe = |value: &Option<String>| value.clone().unwrap_or_else(|| "?".to_string());
-        let verdict = match (self.game_version.as_deref().ok(), catalog.import_version.as_deref()) {
-            (Some(game), Some(imports)) if version::matches(game, imports) => "matches the game",
-            (Some(_), Some(_)) => "DOES NOT MATCH THE GAME",
-            _ => "not compared",
-        };
-        println!(
-            "imports     P{} V{} (pointers V{}) from {} - {verdict}",
-            describe(&catalog.platform),
-            describe(&catalog.import_version),
-            describe(&catalog.pointer_version),
-            catalog.source,
-        );
-        println!("            {} paths", catalog.paths());
-        if !catalog.overridden.is_empty() {
-            println!(
-                "            note: the overlay replaced {} upstream path(s): {}",
-                catalog.overridden.len(),
-                catalog.overridden.join(", ")
-            );
-        }
-        println!(
-            "window      {:#x}{}",
-            self.window.hwnd(),
-            if self.window.is_foreground() { " (foreground)" } else { " (not foreground)" }
-        );
-    }
-
-    fn read(&self, chain: &Chain) -> io::Result<Value> {
-        let address = self.game.resolve(chain.base(self.module), &chain.offsets)?;
-        match chain.kind {
-            Kind::I32 => self.game.read_i32(address).map(|v| Value::Int(v as i64)),
-            Kind::I64 => self.game.read_i64(address).map(Value::Int),
-            Kind::U8 => self.game.read_u8(address).map(|v| Value::Int(v as i64)),
-            Kind::Quad => self.game.read_quad(address).map(Value::Big),
-            Kind::F32 => self.game.read_f32(address).map(|v| Value::Float(v as f64)),
-            Kind::F64 => self.game.read_f64(address).map(Value::Float),
-            Kind::Utf16 => self.game.read_mono_string(address).map(Value::Text),
-        }
-    }
-
-    /// Read one chain for `probe`: print it, and on failure show the hop the
-    /// walk died on. A stale root breaks every chain hanging off it, so each
-    /// root is traced only once.
-    fn report(&self, target: &Target, chain: &Chain, traced: &mut Vec<String>) {
-        match self.read(chain).map(|value| target.finish(value)) {
-            Ok(value) => {
-                let warning = match (&value, target.sane) {
-                    (Value::Int(read), Some((low, high))) if !(low..=high).contains(read) => {
-                        format!("  <- IMPLAUSIBLE, expected {low}..={high}")
-                    }
-                    (Value::Text(text), _) if text.is_empty() => "  <- empty".to_string(),
-                    _ => String::new(),
-                };
-                println!("  {:<12} {value}{warning}", target.label);
-            }
-            Err(err) => {
-                println!("  {:<12} UNREADABLE: {err}", target.label);
-                if traced.contains(&chain.root.name) {
-                    return;
-                }
-                traced.push(chain.root.name.clone());
-                let hops = self.game.trace(chain.base(self.module), &chain.offsets);
-                for (step, hop) in hops.iter().enumerate() {
-                    match hop.value {
-                        Some(value) => println!(
-                            "    hop {step}: [{:#x}] = {value:#x}  +{:#x} -> {:#x}",
-                            hop.at,
-                            hop.offset,
-                            value + hop.offset
-                        ),
-                        None => println!("    hop {step}: [{:#x}] unreadable", hop.at),
-                    }
-                }
-            }
-        }
-    }
+fn attach(cli: &Cli, catalog: Catalog) -> io::Result<Game> {
+    Game::open(find_pid(cli)?, catalog)
 }
 
 /// Something to read: either one of the probe's named values or any dotted
@@ -457,9 +347,7 @@ impl Target {
             other => other,
         }
     }
-}
 
-impl Target {
     fn from(want: &offsets::Want) -> Self {
         Self {
             label: want.label.to_string(),
@@ -507,21 +395,169 @@ impl Target {
     }
 }
 
-enum Value {
-    Int(i64),
-    Float(f64),
-    Big(icrs::mem::Quad),
-    Text(String),
+/// What the game is, what we loaded, and whether the two agree.
+fn print_header(game: &Game) {
+    let catalog = game.catalog();
+    println!("pid         {}", game.pid());
+    println!("exe         {}", game.exe().display());
+    match game.installed_version() {
+        Ok(found) => println!("game        {found}"),
+        Err(err) => println!("game        version unknown: {err}"),
+    }
+    println!("{:<11} {:#x}", offsets::MONO_MODULE, game.module());
+
+    let describe = |value: &Option<String>| value.clone().unwrap_or_else(|| "?".to_string());
+    let verdict = match (game.installed_version().ok(), catalog.import_version.as_deref()) {
+        (Some(installed), Some(imports)) if version::matches(installed, imports) => {
+            "matches the game"
+        }
+        (Some(_), Some(_)) => "DOES NOT MATCH THE GAME",
+        _ => "not compared",
+    };
+    println!(
+        "imports     P{} V{} (pointers V{}) from {} - {verdict}",
+        describe(&catalog.platform),
+        describe(&catalog.import_version),
+        describe(&catalog.pointer_version),
+        catalog.source,
+    );
+    println!("            {} paths", catalog.paths());
+    if !catalog.overridden.is_empty() {
+        println!(
+            "            note: the overlay replaced {} upstream path(s): {}",
+            catalog.overridden.len(),
+            catalog.overridden.join(", ")
+        );
+    }
+    println!(
+        "window      {:#x}{}",
+        game.window().hwnd(),
+        if game.window().is_foreground() { " (foreground)" } else { " (not foreground)" }
+    );
 }
 
-impl std::fmt::Display for Value {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Value::Int(value) => write!(f, "{value}"),
-            Value::Float(value) => write!(f, "{value}"),
-            Value::Big(value) => write!(f, "{value}"),
-            Value::Text(value) => write!(f, "{value:?}"),
+/// Read one chain for `probe`: print it, and on failure show the hop the walk
+/// died on. A stale root breaks every chain hanging off it, so each root is
+/// traced only once.
+fn report(game: &Game, target: &Target, chain: &Chain, traced: &mut Vec<String>) {
+    match game.read(chain).map(|value| target.finish(value)) {
+        Ok(value) => {
+            let warning = match (&value, target.sane) {
+                (Value::Int(read), Some((low, high))) if !(low..=high).contains(read) => {
+                    format!("  <- IMPLAUSIBLE, expected {low}..={high}")
+                }
+                (Value::Text(text), _) if text.is_empty() => "  <- empty".to_string(),
+                _ => String::new(),
+            };
+            println!("  {:<12} {value}{warning}", target.label);
         }
+        Err(err) => {
+            println!("  {:<12} UNREADABLE: {err}", target.label);
+            if traced.contains(&chain.root.name) {
+                return;
+            }
+            traced.push(chain.root.name.clone());
+            let hops = game.process().trace(chain.base(game.module()), &chain.offsets);
+            for (step, hop) in hops.iter().enumerate() {
+                match hop.value {
+                    Some(value) => println!(
+                        "    hop {step}: [{:#x}] = {value:#x}  +{:#x} -> {:#x}",
+                        hop.at,
+                        hop.offset,
+                        value + hop.offset
+                    ),
+                    None => println!("    hop {step}: [{:#x}] unreadable", hop.at),
+                }
+            }
+        }
+    }
+}
+
+/// One sample, as a table. The same numbers a tick of automation would act on.
+fn show(game: &Game, snapshot: &Snapshot) {
+    let number = |value: Option<i64>| match value {
+        Some(value) => value.to_string(),
+        None => "?".to_string(),
+    };
+
+    let zone = match (snapshot.zone, snapshot.on_boss_zone()) {
+        (Some(zone), Some(true)) => format!("{zone} (boss)"),
+        (Some(zone), _) => zone.to_string(),
+        (None, _) => "?".to_string(),
+    };
+    println!("zone        {zone}");
+    println!(
+        "highest     {}   bosses killed {}",
+        number(snapshot.highest_zone),
+        number(snapshot.bosses())
+    );
+    println!("quest left  {}", number(snapshot.quest_left));
+    println!(
+        "modron      target {}{}",
+        number(snapshot.modron_target),
+        match snapshot.transitioning {
+            Some(true) => ", transitioning",
+            Some(false) => "",
+            None => ", transition unknown",
+        }
+    );
+    println!("steelbones  {}", number(snapshot.steelbones));
+    println!("sprint      {}", number(snapshot.sprint));
+    println!("resets      {}", number(snapshot.resets));
+    println!("gems        {}", number(snapshot.gems));
+    match snapshot.since_hit {
+        Some(seconds) => println!("since hit   {seconds:.1}s"),
+        None => println!("since hit   ?"),
+    }
+
+    match &snapshot.cards {
+        Some(hand) if hand.is_empty() => println!("cards       (empty hand)"),
+        Some(hand) => {
+            let named: Vec<&str> =
+                hand.iter().map(|card| offsets::effects::card_name(*card)).collect();
+            println!(
+                "cards       {}   gem {}, moon {}",
+                named.join(", "),
+                number(snapshot.gem_cards().map(|count| count as i64)),
+                number(snapshot.moon_cards().map(|count| count as i64)),
+            );
+        }
+        None => println!("cards       not tracked"),
+    }
+
+    let roster = game.roster().unwrap_or_default();
+    println!("ultimates");
+    for entry in &snapshot.ultimates {
+        println!(
+            "  slot {:>2}  key {}  {:<28} {}",
+            entry.slot,
+            entry.hotkey,
+            format!("{} (#{})", champion(&roster, entry.hero_id), entry.hero_id),
+            state_of(entry)
+        );
+    }
+
+    println!("\nsampled in {:.1}ms", snapshot.took.as_secs_f64() * 1000.0);
+    if !snapshot.healthy() {
+        println!("did not read: {}", snapshot.misses.join(", "));
+    }
+}
+
+fn champion(roster: &[(i64, String)], hero_id: i64) -> String {
+    roster
+        .iter()
+        .find(|(id, _)| *id == hero_id)
+        .map(|(_, name)| name.clone())
+        .unwrap_or_else(|| "?".to_string())
+}
+
+fn state_of(entry: &icrs::game::Ultimate) -> String {
+    if entry.queued {
+        "queued".to_string()
+    } else if entry.ready() {
+        "ready".to_string()
+    } else {
+        format!("{:.0}s", entry.cooldown)
     }
 }
 
@@ -581,170 +617,4 @@ fn wait_for_enter() {
     let _ = io::stdout().flush();
     let mut discard = String::new();
     let _ = io::stdin().read_line(&mut discard);
-}
-
-/// One entry in the ultimates bar.
-struct Ultimate {
-    slot: u64,
-    hero_id: i64,
-    hotkey: i64,
-    cooldown: f64,
-    queued: bool,
-}
-
-impl Ultimate {
-    fn ready(&self) -> bool {
-        self.cooldown <= 0.0
-    }
-}
-
-impl Session {
-    /// Read the ultimates bar. Slots exist for champions without ultimates
-    /// too, so entries that do not resolve are skipped rather than reported.
-    fn ultimates(&self, catalog: &Catalog) -> io::Result<Vec<Ultimate>> {
-        let size = self.read_named(catalog, offsets::ultimates::SIZE, &[])?;
-        let size = match size {
-            Value::Int(size) if (0..=64).contains(&size) => size as u64,
-            other => return Err(io::Error::other(format!("implausible bar size: {other}"))),
-        };
-
-        let mut bar = Vec::new();
-        for slot in 0..size {
-            let at = [0, slot];
-            let (Ok(Value::Int(hero_id)), Ok(Value::Int(hotkey))) = (
-                self.read_named(catalog, offsets::ultimates::HERO_ID, &at),
-                self.read_named(catalog, offsets::ultimates::HOTKEY, &at),
-            ) else {
-                continue;
-            };
-            let cooldown = match self.read_named(catalog, offsets::ultimates::COOLDOWN, &at) {
-                Ok(Value::Float(seconds)) => seconds,
-                _ => continue,
-            };
-            let queued = matches!(
-                self.read_named(catalog, offsets::ultimates::QUEUED, &at),
-                Ok(Value::Int(1))
-            );
-            bar.push(Ultimate { slot, hero_id, hotkey, cooldown, queued });
-        }
-        Ok(bar)
-    }
-
-    /// Champion ids and names, for turning "ellywick" into 83.
-    fn roster(&self, catalog: &Catalog) -> io::Result<Vec<(i64, String)>> {
-        let Value::Int(size) = self.read_named(catalog, offsets::heroes::SIZE, &[])? else {
-            return Err(io::Error::other("hero list size is not a number"));
-        };
-
-        let mut roster = Vec::new();
-        for index in 0..size.clamp(0, 1024) as u64 {
-            let at = [0, index];
-            if let (Ok(Value::Int(id)), Ok(Value::Text(name))) = (
-                self.read_named(catalog, offsets::heroes::ID, &at),
-                self.read_named(catalog, offsets::heroes::NAME, &at),
-            ) {
-                roster.push((id, name));
-            }
-        }
-        Ok(roster)
-    }
-
-    /// Where a champion sits in the hero list, which is what every
-    /// per-champion path is indexed by.
-    fn hero_index(&self, catalog: &Catalog, hero_id: i64) -> io::Result<u64> {
-        let Value::Int(size) = self.read_named(catalog, offsets::heroes::SIZE, &[])? else {
-            return Err(io::Error::other("hero list size is not a number"));
-        };
-        for index in 0..size.clamp(0, 1024) as u64 {
-            if let Ok(Value::Int(id)) =
-                self.read_named(catalog, offsets::heroes::ID, &[0, index])
-                && id == hero_id
-            {
-                return Ok(index);
-            }
-        }
-        Err(io::Error::other(format!("no champion with id {hero_id} in the hero list")))
-    }
-
-    /// Accepts a champion id or a name.
-    fn hero_id(&self, catalog: &Catalog, who: &str) -> io::Result<i64> {
-        if let Ok(id) = who.parse::<i64>() {
-            return Ok(id);
-        }
-        let wanted = who.to_lowercase();
-        let roster = self.roster(catalog)?;
-        roster
-            .iter()
-            .find(|(_, name)| name.to_lowercase() == wanted)
-            .or_else(|| roster.iter().find(|(_, name)| name.to_lowercase().contains(&wanted)))
-            .map(|(id, _)| *id)
-            .ok_or_else(|| io::Error::other(format!("no champion matching {who:?}")))
-    }
-
-    /// Every effect key on a champion, with the dictionary entry it occupies.
-    fn effect_keys(&self, catalog: &Catalog, hero: u64) -> io::Result<Vec<(u64, String)>> {
-        let Value::Int(count) = self.read_named(catalog, offsets::effects::COUNT, &[0, hero])?
-        else {
-            return Err(io::Error::other("effect key count is not a number"));
-        };
-
-        let mut keys = Vec::new();
-        for entry in 0..count.clamp(0, 256) as u64 {
-            if let Ok(Value::Text(key)) =
-                self.read_named(catalog, offsets::effects::KEY, &[0, hero, entry, 0])
-                && !key.is_empty()
-            {
-                keys.push((entry, key));
-            }
-        }
-        Ok(keys)
-    }
-
-    /// The dictionary entry holding one of `candidates`, in preference order.
-    fn find_effect(
-        &self,
-        catalog: &Catalog,
-        hero: u64,
-        candidates: &[&str],
-    ) -> io::Result<u64> {
-        let keys = self.effect_keys(catalog, hero)?;
-        for wanted in candidates {
-            if let Some((entry, _)) = keys.iter().find(|(_, key)| key == wanted) {
-                return Ok(*entry);
-            }
-        }
-        Err(io::Error::other(format!(
-            "none of {candidates:?} among this champion's effect keys ({})",
-            keys.iter().map(|(_, key)| key.as_str()).collect::<Vec<_>>().join(", ")
-        )))
-    }
-
-    /// The card types in hand, in order.
-    fn cards(&self, catalog: &Catalog, hero: u64, entry: u64) -> io::Result<Vec<i64>> {
-        let at = [0, hero, entry, 0, 0];
-        let Value::Int(size) = self.read_named(catalog, offsets::effects::CARDS, &at)? else {
-            return Err(io::Error::other("card count is not a number"));
-        };
-        if !(0..=16).contains(&size) {
-            return Err(io::Error::other(format!("implausible card count: {size}")));
-        }
-
-        let mut hand = Vec::new();
-        for card in 0..size as u64 {
-            let at = [0, hero, entry, 0, 0, card];
-            if let Value::Int(card_type) =
-                self.read_named(catalog, offsets::effects::CARD_TYPE, &at)?
-            {
-                hand.push(card_type);
-            }
-        }
-        Ok(hand)
-    }
-
-    fn read_named(&self, catalog: &Catalog, path: &str, indices: &[u64]) -> io::Result<Value> {
-        let chain = catalog
-            .chain(path, path, indices)
-            .map_err(|err| io::Error::other(err.to_string()))?;
-        self.read(&chain)
-    }
 }

@@ -88,6 +88,13 @@ pub enum Command {
         count: Option<u64>,
     },
 
+    /// Take one full sample of the game state: what a tick of automation sees
+    Snapshot {
+        /// One JSON object instead of a table, for logging a tick per line
+        #[arg(long)]
+        json: bool,
+    },
+
     /// List the ultimates bar: who is in it, which key fires it, cooldown
     Ultimates,
 

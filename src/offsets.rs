@@ -314,6 +314,8 @@ pub mod effects {
         &[(1, "Knight"), (2, "Moon"), (3, "Gem"), (4, "Fates"), (5, "Flames")];
 
     pub const GEM_CARD: i64 = 3;
+    /// Moon raises gold find - the one to stack for gold-find formations.
+    pub const MOON_CARD: i64 = 2;
 
     pub fn card_name(card_type: i64) -> &'static str {
         CARD_TYPES
