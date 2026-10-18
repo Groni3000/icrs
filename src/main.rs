@@ -10,6 +10,7 @@ use icrs::catalog::{Catalog, Chain};
 use icrs::cli::{Cli, Command};
 use icrs::game::Game;
 use icrs::profile;
+use icrs::runtime::{Runtime, Stats, Tick};
 use icrs::snapshot::{Sampler, Snapshot};
 use icrs::value::Value;
 use icrs::{input, offsets, process, version};
@@ -319,6 +320,90 @@ fn run(cli: &Cli) -> io::Result<()> {
             }
         }
 
+        Command::Run { profile, ticks, every, json, dry_run: _ } => {
+            let loaded = profile::discover(profile.as_deref())
+                .map_err(|err| io::Error::other(err.to_string()))?;
+            let tick_every = loaded.profile.tick;
+            let game = attach(cli, catalog)?;
+            let mut runtime = Runtime::start(game, loaded.profile)?;
+
+            if !*json {
+                println!("profile     {} ({})", runtime.profile().name, loaded.source);
+                println!(
+                    "game        pid {}, {}",
+                    runtime.game().pid(),
+                    match runtime.game().installed_version() {
+                        Ok(version) => format!("version {version}"),
+                        Err(_) => "version unknown".to_string(),
+                    }
+                );
+                let watched: Vec<String> = runtime
+                    .profile()
+                    .champions()
+                    .iter()
+                    .map(|champion| match champion.id {
+                        Some(id) if champion.asked != format!("#{id}") => {
+                            format!("{champion} (#{id})")
+                        }
+                        _ => champion.to_string(),
+                    })
+                    .collect();
+                println!("watching    {}", watched.join(", "));
+                for note in runtime.notes() {
+                    println!("note        {note}");
+                }
+                println!(
+                    "dry run     nothing is sent to the game. {} per tick; Ctrl-C to stop\n",
+                    format_args!("{}ms", tick_every.as_millis())
+                );
+            }
+
+            stop::listen();
+            let start = Instant::now();
+            let mut last = String::new();
+            let mut said = Instant::now();
+            let mut done = 0u64;
+
+            loop {
+                let tick = runtime.tick();
+                done += 1;
+
+                if *json {
+                    println!("{}", tick.to_json());
+                } else {
+                    let summary = tick.decision.summary();
+                    // A run can sit on the same decision for hours, so only
+                    // say something when it changes - with a heartbeat so the
+                    // output never looks dead.
+                    let heartbeat = said.elapsed() >= Duration::from_secs(30);
+                    if *every || heartbeat || summary != last {
+                        println!(
+                            "{:>7.1}s  {}",
+                            start.elapsed().as_secs_f64(),
+                            status_line(&runtime, &tick)
+                        );
+                        last = summary;
+                        said = Instant::now();
+                    }
+                }
+                io::stdout().flush()?;
+
+                if ticks.is_some_and(|limit| done >= limit) {
+                    break;
+                }
+                if stop::asked() {
+                    println!("\nstopping");
+                    break;
+                }
+                std::thread::sleep(tick_every.saturating_sub(tick.snapshot.took));
+            }
+
+            if !*json {
+                report_run(runtime.stats(), start.elapsed());
+            }
+            Ok(())
+        }
+
         Command::Bench { count } => {
             let game = attach(cli, catalog)?;
             let reads = (*count).max(1);
@@ -570,6 +655,92 @@ fn report(game: &Game, target: &Target, chain: &Chain, traced: &mut Vec<String>)
             }
         }
     }
+}
+
+/// The state that matters this tick, then what the profile made of it.
+fn status_line(runtime: &Runtime, tick: &Tick) -> String {
+    let snapshot = &tick.snapshot;
+    let mut parts: Vec<String> = Vec::new();
+
+    if let Some(zone) = snapshot.zone {
+        parts.push(format!("zone {zone}"));
+    }
+    match tick.decision.stacks {
+        Some(stacks) => {
+            parts.push(format!("sb {}/{}", stacks.steelbones, stacks.steelbones_needed))
+        }
+        None => {
+            if let Some(steelbones) = snapshot.steelbones {
+                parts.push(format!("sb {steelbones}"));
+            }
+        }
+    }
+    if let Some(sprint) = snapshot.sprint {
+        parts.push(format!("sprint {sprint}"));
+    }
+    if let (Some(deck), Some(hand)) = (runtime.profile().deck.as_ref(), snapshot.cards.as_ref()) {
+        let have = hand.iter().filter(|card| **card == deck.want).count();
+        parts.push(format!(
+            "hand {have} {} of {}",
+            deck.want_name().to_lowercase(),
+            hand.len()
+        ));
+    }
+
+    let mark = if tick.decision.actions.is_empty() { "" } else { "WOULD SEND -> " };
+    format!("{}  | {mark}{}", parts.join("  "), tick.decision.summary())
+}
+
+/// What the run came to, once it stops.
+fn report_run(stats: &Stats, elapsed: Duration) {
+    println!("\nran {} tick(s) over {:.1}s", stats.ticks, elapsed.as_secs_f64());
+    println!(
+        "decided {} action(s), sent {} (dry run), idle on {} tick(s)",
+        stats.decided, stats.sent, stats.idle
+    );
+    println!(
+        "sampling {:.1}ms average, {:.1}ms worst, {:.0} read(s) per tick",
+        stats.average_sample().as_secs_f64() * 1000.0,
+        stats.worst_sample.as_secs_f64() * 1000.0,
+        stats.average_reads()
+    );
+    if stats.incomplete > 0 {
+        println!("{} tick(s) sampled with something missing", stats.incomplete);
+    }
+}
+
+/// Catching Ctrl-C, so a run prints its totals instead of vanishing.
+#[cfg(windows)]
+mod stop {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static ASKED: AtomicBool = AtomicBool::new(false);
+
+    pub fn asked() -> bool {
+        ASKED.load(Ordering::Relaxed)
+    }
+
+    pub fn listen() {
+        use windows_sys::Win32::Foundation::BOOL;
+        use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+
+        unsafe extern "system" fn handler(_kind: u32) -> BOOL {
+            ASKED.store(true, Ordering::Relaxed);
+            1 // handled, so the process is not killed from under the loop
+        }
+
+        // SAFETY: registering a plain function pointer with static lifetime.
+        unsafe { SetConsoleCtrlHandler(Some(handler), 1) };
+    }
+}
+
+#[cfg(not(windows))]
+mod stop {
+    pub fn asked() -> bool {
+        false
+    }
+
+    pub fn listen() {}
 }
 
 /// A profile as loaded, so a typo or a surprising default is visible before

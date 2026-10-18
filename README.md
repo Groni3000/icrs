@@ -56,13 +56,19 @@ The unit tests touch neither the game nor Wine, so with the game closed they
 can still run on the host:
 
 ```
-cargo test --lib --target x86_64-unknown-linux-gnu      # 27 tests, no game
+cargo test --lib --target x86_64-unknown-linux-gnu      # no game needed
+cargo test --release                                   # all of it, through the prefix
 ```
 
 ## Commands
 
 ```
 icrs                     probe (the default)
+icrs run                 watch the game and report what a profile would do
+                         (--profile, --ticks, --every, --json)  - sends nothing
+icrs snapshot            one full sample: the view a tick of the loop acts on (--json)
+icrs profile [path]      load a profile and print it - no game needed (--example)
+icrs bench               what the reads cost: raw access, one walk, one sample (--count)
 icrs probe               read every known value once, flagging implausible ones
 icrs info                the loaded drop, its version vs the game's, each root's health
 icrs read <target>       one value, by probe label or dotted path  (--bare, --index)
@@ -77,6 +83,31 @@ icrs effects <who>       a champion's effect keys
 ```
 
 Global: `--imports <dir>`, `--exe <name>`, `--pid <pid>`, `--pause`.
+
+A profile is thresholds, not a script: `profiles/gem-farm.toml` is the
+commented starting point (`icrs profile --example` prints it). It is looked for
+as `$ICRS_PROFILE`, then `./icrs.toml`, then beside the executable, and the
+built-in defaults are used if none of those exist. Nothing in `icrs run`
+presses a key yet - it reports what it would do:
+
+```
+$ icrs run --ticks 40
+profile     gem farm (profiles/gem-farm.toml)
+game        pid 308, version 1.657
+watching    ellywick (#83), briv (#58)
+dry run     nothing is sent to the game. 250ms per tick; Ctrl-C to stop
+
+    0.0s  zone 176  sb 29  sprint 546  hand 2 gem of 5  | moving between zones
+    1.8s  zone 176  sb 29/834  sprint 546  hand 2 gem of 5  | WOULD SEND -> ultimate: ellywick (slot 7, key 8) - 2 gem card(s) in a hand of 5 with 0 draw(s) left: 3 is out of reach, so discard and redraw
+    2.0s  zone 176  sb 29/834  sprint 546  hand 2 gem of 5  | fired ellywick 0.3s ago, giving the game 3.0s to catch up
+
+ran 40 tick(s) over 9.8s
+decided 1 action(s), sent 0 (dry run), idle on 39 tick(s)
+sampling 2.1ms average, 2.7ms worst, 111 read(s) per tick
+```
+
+A line is printed when the decision changes, with a heartbeat every 30s, so a
+run that sits on one threshold for an hour stays readable.
 
 A target is either one of probe's labels (`zone`, `steelbones`, `gems`,
 `user_id`, `hash`, `instance_id`, `web_root`) or any path from the drop:

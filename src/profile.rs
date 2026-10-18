@@ -337,7 +337,9 @@ impl Default for Profile {
             name: "default".to_string(),
             tick: Duration::from_millis(250),
             deck: Some(Deck {
-                champion: Champion::id(offsets::effects::ELLYWICK_HERO_ID),
+                // Named, like the shipped profile: it reads better in a log,
+                // and the roster lookup happens at startup anyway.
+                champion: Champion::named("ellywick"),
                 hand_size: 5,
                 want: offsets::effects::GEM_CARD,
                 want_at_least: 3,

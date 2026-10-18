@@ -88,6 +88,31 @@ pub enum Command {
         count: Option<u64>,
     },
 
+    /// Watch the game and report what a profile would do - sends nothing
+    Run {
+        /// The profile to run (default: $ICRS_PROFILE, ./icrs.toml, or the
+        /// file beside the executable)
+        #[arg(long, value_name = "PATH")]
+        profile: Option<std::path::PathBuf>,
+
+        /// Stop after this many ticks instead of running until Ctrl-C
+        #[arg(long, value_name = "N")]
+        ticks: Option<u64>,
+
+        /// Print every tick, not only the ones where the decision changed
+        #[arg(long)]
+        every: bool,
+
+        /// One JSON object per tick instead of the status line
+        #[arg(long)]
+        json: bool,
+
+        /// Say it out loud: nothing is sent to the game. It is the only mode
+        /// there is today, so this flag only documents the intent.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Time the reads: raw memory access, one pointer walk, one full sample
     Bench {
         /// How many times to repeat each measurement

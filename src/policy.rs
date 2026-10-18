@@ -194,25 +194,6 @@ pub fn decide(profile: &Profile, state: &State, snapshot: &Snapshot) -> Decision
         }
     }
 
-    if let Some(briv) = &profile.briv {
-        match (snapshot.steelbones, snapshot.sprint) {
-            (Some(steelbones), Some(sprint)) => {
-                let stacks = Stacks {
-                    steelbones,
-                    sprint,
-                    steelbones_needed: briv.steelbones_needed(),
-                    sprint_target: briv.sprint_at_least,
-                    feat: briv.conversion_feat,
-                };
-                if !stacks.enough() {
-                    decision.hold(stacks.progress());
-                }
-                decision.stacks = Some(stacks);
-            }
-            _ => decision.hold("briv's stack counts did not read"),
-        }
-    }
-
     if let Some(deck) = &profile.deck {
         let want = deck.want_name().to_lowercase();
         match &snapshot.cards {
@@ -254,6 +235,27 @@ pub fn decide(profile: &Profile, state: &State, snapshot: &Snapshot) -> Decision
                     );
                 }
             }
+        }
+    }
+
+    // After the deck, because `Decision::summary` shows the first hold and
+    // the stack gate is background: it reports, it never blocks.
+    if let Some(briv) = &profile.briv {
+        match (snapshot.steelbones, snapshot.sprint) {
+            (Some(steelbones), Some(sprint)) => {
+                let stacks = Stacks {
+                    steelbones,
+                    sprint,
+                    steelbones_needed: briv.steelbones_needed(),
+                    sprint_target: briv.sprint_at_least,
+                    feat: briv.conversion_feat,
+                };
+                if !stacks.enough() {
+                    decision.hold(stacks.progress());
+                }
+                decision.stacks = Some(stacks);
+            }
+            _ => decision.hold("briv's stack counts did not read"),
         }
     }
 
