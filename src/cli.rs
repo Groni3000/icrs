@@ -88,6 +88,24 @@ pub enum Command {
         count: Option<u64>,
     },
 
+    /// Time the reads: raw memory access, one pointer walk, one full sample
+    Bench {
+        /// How many times to repeat each measurement
+        #[arg(long, default_value_t = 2000, value_name = "N")]
+        count: u32,
+    },
+
+    /// Load a profile, check it, and print what it says - no game needed
+    Profile {
+        /// The .toml to read (default: $ICRS_PROFILE, ./icrs.toml, or the
+        /// file beside the executable)
+        path: Option<std::path::PathBuf>,
+
+        /// Print a commented starting profile instead of reading one
+        #[arg(long)]
+        example: bool,
+    },
+
     /// Take one full sample of the game state: what a tick of automation sees
     Snapshot {
         /// One JSON object instead of a table, for logging a tick per line

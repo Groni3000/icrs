@@ -9,6 +9,7 @@ use clap::Parser;
 use icrs::catalog::{Catalog, Chain};
 use icrs::cli::{Cli, Command};
 use icrs::game::Game;
+use icrs::profile;
 use icrs::snapshot::{Sampler, Snapshot};
 use icrs::value::Value;
 use icrs::{input, offsets, process, version};
@@ -52,6 +53,17 @@ fn run(cli: &Cli) -> io::Result<()> {
             } else {
                 println!("{} path(s)", found.len());
             }
+            Ok(())
+        }
+
+        Command::Profile { path, example } => {
+            if *example {
+                print!("{}", profile::EXAMPLE);
+                return Ok(());
+            }
+            let loaded = profile::discover(path.as_deref())
+                .map_err(|err| io::Error::other(err.to_string()))?;
+            show_profile(&loaded);
             Ok(())
         }
 
@@ -307,6 +319,85 @@ fn run(cli: &Cli) -> io::Result<()> {
             }
         }
 
+        Command::Bench { count } => {
+            let game = attach(cli, catalog)?;
+            let reads = (*count).max(1);
+            // One ordinary scalar, deep enough to be representative.
+            let path = "game.gameInstances.ActiveCampaignData.currentAreaID";
+            let chain = game.chain(path, &[])?;
+            let hops = chain.offsets.len();
+            let address = game.process().resolve(chain.base(game.module()), &chain.offsets)?;
+
+            let per = |elapsed: Duration, ops: u32| elapsed.as_secs_f64() * 1e6 / ops as f64;
+
+            let start = Instant::now();
+            for _ in 0..reads {
+                game.process().read_i32(address)?;
+            }
+            let raw = start.elapsed();
+
+            // The same call asking for 4KB instead of 4 bytes: if it costs
+            // the same, the price is the call, not the bytes, and the way to
+            // go faster is fewer and fatter reads.
+            let mut block = vec![0u8; 4096];
+            let start = Instant::now();
+            for _ in 0..reads {
+                game.process().read_into(address & !0xFFF, &mut block)?;
+            }
+            let bulk = start.elapsed();
+
+            let start = Instant::now();
+            for _ in 0..reads {
+                game.read(&chain)?;
+            }
+            let walked = start.elapsed();
+
+            let start = Instant::now();
+            for _ in 0..reads {
+                game.chain(path, &[])?;
+            }
+            let resolved = start.elapsed();
+
+            let sampler = Sampler::new(&game)?;
+            let ticks = (reads / 20).max(5);
+            let start = Instant::now();
+            let mut values = 0;
+            for _ in 0..ticks {
+                let snapshot = sampler.take(&game);
+                values = 11 + snapshot.ultimates.len() * 4
+                    + snapshot.cards.as_ref().map_or(0, |hand| hand.len() + 1);
+            }
+            let sampled = start.elapsed();
+
+            println!("pid {} - {reads} repetitions\n", game.pid());
+            println!("one 4-byte read at a known address    {:>8.1} us", per(raw, reads));
+            println!(
+                "one 4096-byte read at a known address  {:>8.1} us  = {:.0}x the bytes for {:.2}x the time",
+                per(bulk, reads),
+                4096.0 / 4.0,
+                per(bulk, reads) / per(raw, reads)
+            );
+            println!(
+                "one pointer walk + read ({hops} hops)        {:>8.1} us  = {:.1} us per hop",
+                per(walked, reads),
+                per(walked, reads) / (hops + 1) as f64
+            );
+            println!(
+                "building the chain from the imports    {:>8.1} us  (no game access at all)",
+                per(resolved, reads)
+            );
+            println!(
+                "\none full sample ({values} values)         {:>8.0} us  = {:.1} reads' worth",
+                per(sampled, ticks),
+                per(sampled, ticks) / per(raw, reads)
+            );
+            println!(
+                "\nat tick 250ms that is {:.1}% of the time, and a 60fps frame is 16667us",
+                per(sampled, ticks) / 2_500.0
+            );
+            Ok(())
+        }
+
         Command::Snapshot { json } => {
             let game = attach(cli, catalog)?;
             let sampler = Sampler::new(&game)?;
@@ -470,6 +561,85 @@ fn report(game: &Game, target: &Target, chain: &Chain, traced: &mut Vec<String>)
                 }
             }
         }
+    }
+}
+
+/// A profile as loaded, so a typo or a surprising default is visible before
+/// anything is sent to the game.
+fn show_profile(loaded: &profile::Loaded) {
+    let profile = &loaded.profile;
+    println!("profile     {}", profile.name);
+    println!("source      {}", loaded.source);
+    println!("tick        {}ms", profile.tick.as_millis());
+
+    match &profile.deck {
+        Some(deck) => {
+            println!(
+                "deck        {} - keep {} {} card(s) of a hand of {}",
+                deck.champion,
+                deck.want_at_least,
+                deck.want_name().to_lowercase(),
+                deck.hand_size
+            );
+            println!(
+                "            the ultimate only fires once {} can no longer be reached",
+                deck.want_at_least
+            );
+            match deck.zone_at_least {
+                0 => println!("            at any zone"),
+                zone => println!("            and only at zone {zone} or deeper"),
+            }
+        }
+        None => println!("deck        not watched (no [deck] section)"),
+    }
+
+    match &profile.briv {
+        Some(briv) => {
+            println!(
+                "briv        {} - start the next run with {} sprint stacks",
+                briv.champion, briv.sprint_at_least
+            );
+            println!(
+                "            so tank {} steelbones this run ({})",
+                briv.steelbones_needed(),
+                if briv.conversion_feat { "x1.2 conversion feat" } else { "1:1, no feat" }
+            );
+            println!("            reported only: nothing is pressed over these yet");
+        }
+        None => println!("briv        not watched (no [briv] section)"),
+    }
+
+    let ready = &profile.ultimates.fire_when_ready;
+    println!(
+        "ultimates   fire when ready: {}",
+        if ready.is_empty() {
+            "(none)".to_string()
+        } else {
+            ready.iter().map(|champion| champion.to_string()).collect::<Vec<_>>().join(", ")
+        }
+    );
+    println!("            recast {:.1}s", profile.ultimates.recast.as_secs_f64());
+
+    let mut guards: Vec<&str> = Vec::new();
+    if profile.guards.skip_while_transitioning {
+        guards.push("skip while transitioning");
+    }
+    if profile.guards.require_full_reads {
+        guards.push("require full reads");
+    }
+    println!(
+        "guards      {}",
+        if guards.is_empty() { "none".to_string() } else { guards.join(", ") }
+    );
+
+    let unresolved: Vec<String> = profile
+        .champions()
+        .iter()
+        .filter(|champion| champion.id.is_none())
+        .map(|champion| champion.to_string())
+        .collect();
+    if !unresolved.is_empty() {
+        println!("            {} matched against the roster at run time", unresolved.join(", "));
     }
 }
 

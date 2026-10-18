@@ -1,0 +1,117 @@
+# An icrs profile. Thresholds, not a script: the loop is fixed, this file only
+# says where its limits are. Every setting is optional and falls back to the
+# value shown; a misspelled one is refused with its line number instead of
+# quietly doing nothing.
+name = "gem farm"
+
+# How often to look at the game, in milliseconds. One look costs ~12ms.
+#   250  -> four looks a second. Reacts to a drawn card within a quarter second.
+#   1000 -> once a second. Perfectly fine, just slower to notice a draw.
+tick_ms = 250
+
+
+# --- Ellywick's Deck of Many Things ----------------------------------------
+# She draws one card at a time up to a full hand, and the cards she is HOLDING
+# are the bonus: gem cards raise gem find, moon cards raise gold find. Her
+# ultimate throws the ENTIRE hand away and she starts again from nothing, so
+# pressing it is a re-draw, not a payoff.
+#
+# Hence the one rule here: the ultimate is pressed only when the hand can no
+# longer reach the number of cards you want, counting the draws she has left.
+# A hand that can still get there is left alone, and a hand that already has
+# what you want is never touched.
+#
+# Delete this whole section to leave her deck alone entirely.
+[deck]
+# Whose deck. A champion is a name as the game spells it, or an id - `icrs
+# ultimates` prints both.
+champion = "ellywick"
+
+# How many cards she can hold at once. 5 is the normal maximum, and it is what
+# "draws left" is counted against.
+hand_size = 5
+
+# The card type you are collecting: "gem", "moon", "knight", "fates" or
+# "flames".
+#   gem farming      -> "gem"   (gem find)
+#   gold formation   -> "moon"  (gold find)
+want = "gem"
+
+# How many of that card the hand should end up holding. With want = "gem",
+# want_at_least = 3 and hand_size = 5, a whole run of the deck looks like this:
+#   0 cards, 0 gems -> left alone: five draws to come, 3 is still reachable
+#   1 card,  1 gem  -> left alone: 1 + 4 draws still clears 3
+#   4 cards, 1 gem  -> ULTIMATE: even a gem fifth card would only make 2
+#   4 cards, 2 gems -> left alone: the fifth card can still make it 3
+#   5 cards, 2 gems -> ULTIMATE: the hand is full and short, so redraw
+#   5 cards, 3 gems -> left alone for good: this is what we were after
+# For a gold-find formation, want = "moon" with want_at_least = 5 means only a
+# full hand of moon cards is kept, and anything less is redrawn.
+want_at_least = 3
+
+# The earliest zone at which the ultimate may be pressed at all. The hand is
+# still watched below it, just never discarded.
+#   0   -> no zone check: redraw as soon as a hand is hopeless, anywhere
+#   250 -> nothing is pressed before zone 250. This is for parking Briv in one
+#          zone to farm Steelbones stacks: a hopeless hand is still carrying
+#          some gem find, and while you sit there killing the same boss over
+#          and over, keeping it beats spending three minutes of cooldown to
+#          chase a better one.
+zone_at_least = 0
+
+
+# --- Briv's stacks ---------------------------------------------------------
+# Two names for one stack at two points in its life. During a run Briv builds
+# STEELBONES stacks by tanking (never by restarting the client). When the
+# modron core resets the run, those are converted into SPRINT stacks - the
+# skill is called Unnatural Haste - and the Sprint stacks are what skip zones
+# in the run that follows.
+#
+# So what belongs in a file is the Sprint count the next run should start with.
+# The Steelbones count to farm for it is worked out from the conversion ratio,
+# not configured.
+#
+# These thresholds are the gate the skip cycle will wait on. `icrs run` reports
+# progress towards them every tick; nothing presses a key over them yet.
+#
+# Delete this section to stop watching the stacks.
+[briv]
+champion = "briv"
+
+# Sprint stacks the NEXT run should begin with - the number this run's tanking
+# is working towards.
+#   1000 -> a short farm cycle
+#   8000 -> a long one, many more zones skipped after the reset
+sprint_at_least = 1000
+
+# Is the feat that converts 1 Steelbones stack into 1.2 Sprint stacks taken?
+# It decides how many Steelbones stacks the run has to finish with:
+#   sprint_at_least = 1000, conversion_feat = true  -> farm 834 steelbones (834 x 1.2 = 1000.8)
+#   sprint_at_least = 1000, conversion_feat = false -> farm 1000 steelbones (1:1)
+conversion_feat = true
+
+
+# --- Ultimates -------------------------------------------------------------
+[ultimates]
+# Champions whose ultimate should simply go off whenever it is off cooldown,
+# with no condition attached. Names or ids.
+#   []                 -> nothing is fired on cooldown alone (the default)
+#   ["shandie"]        -> her ultimate every time it comes back
+fire_when_ready = []
+
+# How long to leave a champion alone after pressing their key, in milliseconds.
+# The client takes a moment to show the cooldown it just started, and until it
+# does, every tick reads the same "ready" and would press again.
+#   3000 -> three seconds of quiet. Lower it only if you see missed presses.
+recast_ms = 3000
+
+
+# --- Guards ----------------------------------------------------------------
+[guards]
+# Do nothing while the party is moving between zones - mid-transition the game
+# is between two states and a press can land in neither.
+skip_while_transitioning = true
+
+# Act only on a sample where every value read. With this off, a tick that
+# failed to read the hand still fires the rules that do not need it.
+require_full_reads = true

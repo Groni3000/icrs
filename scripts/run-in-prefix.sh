@@ -81,7 +81,10 @@ MSG
     exit 1
 fi
 
-run_in() { "$LC" --inside-app="$APPID" -- "$@"; }
+# Keep our own working directory inside the container: without it the exe
+# starts wherever the service happens to sit, and a relative path typed in the
+# shell (a profile, an imports folder) does not exist from in there.
+run_in() { "$LC" --inside-app="$APPID" --directory="$PWD" -- "$@"; }
 
 case "${1:-}" in
   --env)   run_in /bin/sh -c 'env | sort'; exit $? ;;
@@ -102,4 +105,4 @@ EXE=$(readlink -f "$1"); shift
 [ -f "$EXE" ] || die "not found: $EXE"
 
 # Not run_in: exec cannot replace the process with a shell function.
-exec "$LC" --inside-app="$APPID" -- "$WINE" "$EXE" "$@"
+exec "$LC" --inside-app="$APPID" --directory="$PWD" -- "$WINE" "$EXE" "$@"

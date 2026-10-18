@@ -4,11 +4,11 @@
 //! here, so the command line stays presentation only and `snapshot` can sample
 //! the game without going through it.
 
-use std::io;
-
 // Reading another process and posting keystrokes into its window are both
 // Win32; the data shapes below are not, so they stay available to tests on any
 // host (see `crate::mem`).
+#[cfg(windows)]
+use std::io;
 #[cfg(windows)]
 use std::path::{Path, PathBuf};
 
